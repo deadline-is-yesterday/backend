@@ -6,6 +6,7 @@ from flask_cors import CORS
 
 from extensions import socketio
 import firemap
+import firesim
 import radio
 import logging
 
@@ -21,6 +22,8 @@ def create_app() -> Flask:
     socketio.init_app(app, cors_allowed_origins="*", async_mode="eventlet")
     radio.init_app(socketio)
     firemap.init_app(app)
+    firesim.init_app(app)
+    firesim.init_socketio(socketio)
 
     @app.errorhandler(404)
     def page_not_found(e):
