@@ -7,7 +7,9 @@ from flask_cors import CORS
 from extensions import socketio
 import firemap
 import firesim
+import game_logic
 import radio
+
 import logging
 
 logging.basicConfig(
@@ -25,6 +27,7 @@ def create_app() -> Flask:
     firemap.init_app(app)
     firesim.init_app(app)
     firesim.init_socketio(socketio)
+    game_logic.init_app(app)
 
     @app.errorhandler(404)
     def page_not_found(e):
