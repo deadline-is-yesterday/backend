@@ -1,7 +1,7 @@
 import eventlet
 eventlet.monkey_patch()
 
-from flask import Flask
+from flask import Flask,send_from_directory
 from flask_cors import CORS
 
 from extensions import socketio
