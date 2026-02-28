@@ -67,5 +67,5 @@ class RadioNamespace(Namespace):
     def on_audio_chunk(self, data: bytes) -> None:
         sid = request.sid
         if self._stack and self._stack[0] == sid:
-            logger.debug("audio_chunk: sid=%s bytes=%d → relay to %d clients", sid, len(data), len(self._clients) - 1)
+            # logger.debug("audio_chunk: sid=%s bytes=%d → relay to %d clients", sid, len(data), len(self._clients) - 1)
             socketio.emit("audio_chunk", data, namespace="/", skip_sid=sid)
