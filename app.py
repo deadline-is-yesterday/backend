@@ -1,8 +1,10 @@
-from flask import Flask, send_from_directory
+import eventlet
+eventlet.monkey_patch()
+
+from flask import Flask
 from flask_cors import CORS
 
 from extensions import socketio
-import firemap
 import radio
 import logging
 
@@ -10,7 +12,6 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-
 
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -25,7 +26,6 @@ def create_app() -> Flask:
         return send_from_directory("firemap/plans", f"пепешнелефтв.png")
 
     return app
-
 
 if __name__ == "__main__":
     app = create_app()
