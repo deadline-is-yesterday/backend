@@ -1,9 +1,17 @@
+import logging
 import os
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
-_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fire_simulation_full.db")
+logger = logging.getLogger(__name__)
+
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_FIREMAP_DIR = os.path.join(_BACKEND_DIR, "firemap")
+_TEMPLATE_DB = os.path.join(_FIREMAP_DIR, "fire_simulation_full.db")
+_GAMES_DIR = os.path.join(_FIREMAP_DIR, "games")
+_SYSTEM_DB = os.path.join(_BACKEND_DIR, "system.db")
 
 # Piece length for all hose diameters (standard 20 m sections)
 _HOSE_PIECE_LENGTH_M = 20
@@ -85,11 +93,45 @@ class FireMap:
         }
 
 
+# ── Game DB management ────────────────────────────────────────────────────────
+
+def _game_db_path(game_id: str) -> str:
+    return os.path.join(_GAMES_DIR, f"{game_id}.db")
+
+
+def ensure_game_db(game_id: str) -> str:
+    """Copy template DB for the game if it doesn't exist yet. Return path."""
+    path = _game_db_path(game_id)
+    if not os.path.exists(path):
+        os.makedirs(_GAMES_DIR, exist_ok=True)
+        shutil.copy2(_TEMPLATE_DB, path)
+        logger.info("Created game DB: %s", path)
+    return path
+
+
+def get_game_db(game_id: str) -> sqlite3.Connection:
+    """Return a connection to the game's DB (creates copy from template if needed)."""
+    path = ensure_game_db(game_id)
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def get_active_game_id() -> str:
+    """Read the active game id from system.db."""
+    con = sqlite3.connect(_SYSTEM_DB)
+    try:
+        row = con.execute("SELECT value FROM settings WHERE key = 'active_game_id'").fetchone()
+        return row[0] if row else "0"
+    finally:
+        con.close()
+
+
 # ── DB loader ─────────────────────────────────────────────────────────────────
 
-def _load_equipment() -> list[Equipment]:
-    con = sqlite3.connect(_DB_PATH)
-    con.row_factory = sqlite3.Row
+def load_equipment(game_id: str | None = None) -> list[Equipment]:
+    gid = game_id or get_active_game_id()
+    con = get_game_db(gid)
     try:
         vehicles = con.execute("SELECT * FROM vehicles ORDER BY id").fetchall()
         result: list[Equipment] = []
@@ -115,7 +157,7 @@ def _load_equipment() -> list[Equipment]:
 
             result.append(
                 Equipment(
-                    id=f"vehicle_{v['id']}",
+                    id=f"{v['id']}",
                     name=v["model_name"],
                     icon_path=_icon_for(v["model_name"]),
                     hoses=hoses,
@@ -125,9 +167,6 @@ def _load_equipment() -> list[Equipment]:
         return result
     finally:
         con.close()
-
-
-EQUIPMENT_LIST: list[Equipment] = _load_equipment()
 
 MAPS: dict[str, FireMap] = {
     "default": FireMap(
