@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch()
+
 from flask import Flask, send_from_directory
 from flask_cors import CORS
 
@@ -21,6 +24,7 @@ def create_app() -> Flask:
     radio.init_app(socketio)
     firemap.init_app(app)
     firesim.init_app(app)
+    firesim.init_socketio(socketio)
 
     @app.errorhandler(404)
     def page_not_found(e):
@@ -31,4 +35,4 @@ def create_app() -> Flask:
 
 if __name__ == "__main__":
     app = create_app()
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    socketio.run(app, host="0.0.0.0", port=5000, debug=False)
