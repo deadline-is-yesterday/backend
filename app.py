@@ -1,7 +1,8 @@
-from flask import Flask
+from flask import Flask, send_from_directory
 from flask_cors import CORS
 
 from extensions import socketio
+import firemap
 import radio
 import logging
 
@@ -17,6 +18,11 @@ def create_app() -> Flask:
 
     socketio.init_app(app, cors_allowed_origins="*", async_mode="eventlet")
     radio.init_app(socketio)
+    firemap.init_app(app)
+
+    @app.errorhandler(404)
+    def page_not_found(e):
+        return send_from_directory("firemap/plans", f"пепешнелефтв.png")
 
     return app
 
