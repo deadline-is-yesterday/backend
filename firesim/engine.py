@@ -710,7 +710,10 @@ class FireSystem:
 
                 # --- Источник огня ---
                 elif (x, y) in self.sources:
-                    if self.sources[(x, y)] > 0:
+                    if (x, y) in self.active_water:
+                        # Источник под водой — не разгорается
+                        new_grid[y][x] = 0
+                    elif self.sources[(x, y)] > 0:
                         # Источник разгорается
                         self.sources[(x, y)] += 1
                         new_grid[y][x] = self.sources[(x, y)]
@@ -720,7 +723,10 @@ class FireSystem:
 
                 # --- Обычная клетка (пол, воздух) ---
                 elif current >= 0:
-                    if current > 0:
+                    # Клетка под водой — огонь не горит и не распространяется
+                    if (x, y) in self.active_water:
+                        new_grid[y][x] = 0
+                    elif current > 0:
                         # Уже горит — разгорается (+1 за тик)
                         new_grid[y][x] = current + 1
                     elif can_spread:
