@@ -11,11 +11,14 @@ import game_logic
 import radio
 
 import logging
+import os
+from dotenv import load_dotenv
 
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+load_dotenv()
 
 
 def create_app() -> Flask:
@@ -38,4 +41,4 @@ def create_app() -> Flask:
 
 if __name__ == "__main__":
     app = create_app()
-    socketio.run(app, host="0.0.0.0", port=5000, debug=False)
+    socketio.run(app, host="0.0.0.0", port=5000, debug=os.getenv("DEBUG"))
