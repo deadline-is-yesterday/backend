@@ -23,7 +23,7 @@ def start_simulation():
         width:    int                               - grid width
         height:   int                               - grid height
         speed_n:  int (opt)                         - tick divisor (default 1)
-        walls:    list of {x, y, hp}                - wall cells
+        walls:    list of {x, y, type|kind?, hp?}   - barriers
         sources:  list of {x, y, intensity}         - fire sources
         trucks:   list of {id, x, y, water}         - firetrucks
     """
@@ -36,7 +36,12 @@ def start_simulation():
     sim = FireSystem(width, height, speed_n)
 
     for wall in data.get("walls", []):
-        sim.set_wall(wall["x"], wall["y"], wall.get("hp", -30))
+        sim.set_barrier(
+            wall["x"],
+            wall["y"],
+            kind=wall.get("type", wall.get("kind", "wall")),
+            hp=wall.get("hp"),
+        )
 
     for src in data.get("sources", []):
         sim.set_source(src["x"], src["y"], src.get("intensity", 1000))
