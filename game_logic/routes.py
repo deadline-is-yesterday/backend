@@ -2,6 +2,7 @@ import logging
 
 from flask import Blueprint, jsonify, request
 from firemap.models import get_active_game_id, get_game_db
+from game.logger import log_event
 
 logger = logging.getLogger(__name__)
 bp = Blueprint("game_logic", __name__, url_prefix="/game_logic")
@@ -30,6 +31,7 @@ def add_to_roster():
 
         con.execute("INSERT INTO fire_roster (vehicle_id) VALUES (?)", (vehicle_id,))
         con.commit()
+        log_event(get_active_game_id(), "roster_add", {"vehicle_id": vehicle_id})
         logger.info("ROSTER ADD: vehicle_id=%s", vehicle_id)
         return jsonify({"ok": True})
     finally:
@@ -54,6 +56,7 @@ def remove_from_roster():
         con.execute("DELETE FROM placed_cars WHERE vehicle_id = ?", (vehicle_id,))
         con.execute("DELETE FROM fire_roster WHERE vehicle_id = ?", (vehicle_id,))
         con.commit()
+        log_event(get_active_game_id(), "roster_remove", {"vehicle_id": vehicle_id})
         logger.info("ROSTER REMOVE: vehicle_id=%s", vehicle_id)
         return jsonify({"ok": True})
     finally:
@@ -98,6 +101,9 @@ def create_car():
         )
         con.commit()
         placed_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+        log_event(get_active_game_id(), "car_place", {
+            "vehicle_id": vehicle_id, "placed_id": placed_id, "x": x, "y": y,
+        })
         logger.info("CAR CREATE: vehicle_id=%s placed_id=%s x=%.1f y=%.1f", vehicle_id, placed_id, x, y)
         return jsonify({"ok": True, "id": placed_id})
     finally:
@@ -123,6 +129,7 @@ def update_car():
 
         con.execute("UPDATE placed_cars SET x = ?, y = ? WHERE id = ?", (x, y, car_id))
         con.commit()
+        log_event(get_active_game_id(), "car_move", {"placed_id": car_id, "x": x, "y": y})
         logger.info("CAR MOVE: placed_id=%s x=%.1f y=%.1f", car_id, x, y)
         return jsonify({"ok": True})
     finally:
@@ -146,6 +153,7 @@ def delete_car():
 
         con.execute("DELETE FROM placed_cars WHERE id = ?", (car_id,))
         con.commit()
+        log_event(get_active_game_id(), "car_remove", {"placed_id": car_id})
         logger.info("CAR DELETE: placed_id=%s", car_id)
         return jsonify({"ok": True})
     finally:
@@ -178,6 +186,9 @@ def create_hose():
             (hose_id, x, y, angle, int(active)),
         )
         con.commit()
+        log_event(get_active_game_id(), "hose_place", {
+            "hose_id": hose_id, "x": x, "y": y, "angle": angle, "active": active,
+        })
         logger.info("HOSE CREATE: id=%s x=%.1f y=%.1f angle=%.1f active=%s", hose_id, x, y, angle, active)
         return jsonify({"ok": True})
     finally:
@@ -213,6 +224,10 @@ def update_hose():
             (new_x, new_y, new_angle, new_active, hose_id),
         )
         con.commit()
+        log_event(get_active_game_id(), "hose_move", {
+            "hose_id": hose_id, "x": new_x, "y": new_y,
+            "angle": new_angle, "active": bool(new_active),
+        })
         logger.info("HOSE UPDATE: id=%s x=%.1f y=%.1f angle=%.1f active=%s", hose_id, new_x, new_y, new_angle,
                     bool(new_active))
         return jsonify({"ok": True})
@@ -237,6 +252,7 @@ def delete_hose():
 
         con.execute("DELETE FROM placed_hoses WHERE id = ?", (hose_id,))
         con.commit()
+        log_event(get_active_game_id(), "hose_remove", {"hose_id": hose_id})
         logger.info("HOSE DELETE: id=%s", hose_id)
         return jsonify({"ok": True})
     finally:

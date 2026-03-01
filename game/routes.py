@@ -16,6 +16,8 @@ from firemap.models import (
 )
 from headquarters.models import ensure_game_db as ensure_headquarters_game_db
 
+from game.logger import log_event
+
 logger = logging.getLogger(__name__)
 bp = Blueprint("game", __name__, url_prefix="/game")
 
@@ -124,6 +126,7 @@ def update_game_status():
             finally:
                 con.close()
 
+    log_event(get_active_game_id(), "simulation_start" if is_running else "simulation_stop")
     logger.info("GAME STATUS: is_running=%s", is_running)
     return jsonify({"ok": True})
 
@@ -211,6 +214,9 @@ def save_map_grid():
     finally:
         con.close()
 
+    log_event(get_active_game_id(), "grid_save", {
+        "resolution": resolution, "grid_rows": grid_rows,
+    })
     logger.info("GRID SAVE: %dx%d", resolution, grid_rows)
     return jsonify({"ok": True})
 
@@ -257,6 +263,12 @@ def save_scenario():
     finally:
         con.close()
 
+    log_event(get_active_game_id(), "scenario_save", {
+        "temperature": data.get("temperature"),
+        "wind_speed": data.get("wind_speed"),
+        "wind_direction": data.get("wind_direction"),
+        "target_address": data.get("target_address"),
+    })
     logger.info("SCENARIO SAVE")
     return jsonify({"ok": True})
 
@@ -558,3 +570,16 @@ def leave_role():
         con.close()
 
     return jsonify({"ok": True})
+
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+
+@bp.get("/logs")
+def get_logs():
+    """Return game event logs for the active game (or a specific game via ?game_id=)."""
+    game_id = request.args.get("game_id") or get_active_game_id()
+    if not game_id or game_id == "0":
+        return jsonify([])
+
+    from game.logger import read_logs
+    return jsonify(read_logs(game_id))
