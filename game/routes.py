@@ -10,10 +10,11 @@ from werkzeug.utils import secure_filename
 from firemap.models import (
     _GAMES_DIR,
     _SYSTEM_DB,
-    ensure_game_db,
+    ensure_game_db as ensure_firemap_game_db,
     get_active_game_id,
     get_game_db,
 )
+from headquarters.models import ensure_game_db as ensure_headquarters_game_db
 
 logger = logging.getLogger(__name__)
 bp = Blueprint("game", __name__, url_prefix="/game")
@@ -61,7 +62,8 @@ def create_game():
     name = data.get("name", "")
 
     game_id = str(uuid.uuid4())[:8]
-    ensure_game_db(game_id)
+    ensure_firemap_game_db(game_id)
+    ensure_headquarters_game_db(game_id)
     _set_system("active_game_id", game_id)
     _set_system("is_running", "0")
 
