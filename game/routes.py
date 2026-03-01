@@ -142,6 +142,7 @@ def update_game_status():
                             sim.set_source(x, y, 1000)
 
                 sim_state.simulations[game_id] = sim
+                sim_state.game_to_map[game_id] = game_id
                 sync_hose_ends(game_id)
                 start_tick_loop(game_id)
                 logger.info("Fire sim started for game %s (%dx%d)", game_id, resolution, grid_rows)

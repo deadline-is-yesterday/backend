@@ -566,6 +566,8 @@ class FireSystem:
         if truck.water <= 0:
             return
 
+        amount = 1000000000000000
+
         nx = nozzle.x
         ny = nozzle.y
         main_angle = nozzle.angle  # радианы

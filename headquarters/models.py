@@ -213,26 +213,55 @@ def load_map(game_id: str | None = None) -> HQMap | None:
 
 
 def load_layout(game_id: str | None = None) -> dict:
-    """Load the layout JSON from the game DB."""
+    """Load the layout JSON from the game DB.
+
+    hose_ends always come from the placed_hose_ends table (source of truth),
+    not from the JSON blob stored in layouts.
+    """
     gid = game_id or get_active_game_id()
     con = get_game_db(gid)
     try:
         row = con.execute("SELECT data FROM layouts WHERE id = 1").fetchone()
         if row is None:
-            return {}
-        import json
-        return json.loads(row["data"])
+            layout: dict[str, Any] = {}
+        else:
+            import json
+            layout = json.loads(row["data"])
+
+        # Source of truth for hose_ends is the relational table.
+        hose_end_rows = con.execute(
+            "SELECT * FROM placed_hose_ends ORDER BY id"
+        ).fetchall()
+        layout["hose_ends"] = [
+            {
+                "id": r["id"],
+                "placed_hose_id": r["placed_hose_id"],
+                "x": r["x"],
+                "y": r["y"],
+                "angle": r["angle"],
+                "active": bool(r["active"]),
+                "hydrant_id": r["hydrant_id"],
+                "vehicle_id": r["vehicle_id"],
+            }
+            for r in hose_end_rows
+        ]
+        return layout
     finally:
         con.close()
 
 
 def save_layout(layout: dict, game_id: str | None = None) -> None:
-    """Save the layout JSON to the game DB."""
+    """Save the layout JSON to the game DB.
+
+    hose_ends are stripped from the JSON because the relational table
+    placed_hose_ends is the single source of truth for them.
+    """
     gid = game_id or get_active_game_id()
     con = get_game_db(gid)
     try:
         import json
-        data = json.dumps(layout, ensure_ascii=False)
+        clean = {k: v for k, v in layout.items() if k != "hose_ends"}
+        data = json.dumps(clean, ensure_ascii=False)
         con.execute(
             "INSERT OR REPLACE INTO layouts (id, data) VALUES (1, ?)",
             (data,),

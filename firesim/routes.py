@@ -55,6 +55,15 @@ def start_simulation():
         )
 
     state.simulations[map_id] = sim
+
+    # Привязываем active game_id к map_id для sync_hose_ends
+    from firemap.models import get_active_game_id
+    try:
+        gid = get_active_game_id()
+        state.game_to_map[gid] = map_id
+    except Exception:
+        pass
+
     return jsonify({"ok": True, "map_id": map_id})
 
 
@@ -66,6 +75,10 @@ def reset_simulation():
     stop_tick_loop(map_id)
     state.simulations.pop(map_id, None)
     state.tick_rates.pop(map_id, None)
+    # Очищаем маппинг game_id → map_id
+    state.game_to_map = {
+        k: v for k, v in state.game_to_map.items() if v != map_id
+    }
     return jsonify({"ok": True})
 
 

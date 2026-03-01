@@ -12,3 +12,6 @@ simulations: dict[str, FireSystem] = {}
 
 # map_id -> ticks per second (default 5)
 tick_rates: dict[str, float] = {}
+
+# game_id -> map_id (allows sync_hose_ends to find the right simulation)
+game_to_map: dict[str, str] = {}

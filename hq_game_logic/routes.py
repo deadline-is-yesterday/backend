@@ -3,7 +3,6 @@ import logging
 from flask import Blueprint, jsonify, request
 from headquarters.models import get_active_game_id, get_game_db
 from game.logger import log_event
-from firesim.water_sync import sync_hose_ends
 
 logger = logging.getLogger(__name__)
 bp = Blueprint("hq_game_logic", __name__, url_prefix="/hq_game_logic")
@@ -259,6 +258,7 @@ def delete_hose():
 def create_hose_end():
     """Create a hose end. If hydrant_id is set — fills vehicle, otherwise drains it."""
     data = request.get_json()
+    frontend_id = data.get("id")  # UUID от фронтенда
     placed_hose_id = data.get("placed_hose_id")
     x = data.get("x")
     y = data.get("y")
@@ -286,21 +286,29 @@ def create_hose_end():
             if vehicle is None:
                 return jsonify({"error": "vehicle not placed"}), 404
 
-        con.execute(
-            """INSERT INTO placed_hose_ends
-               (placed_hose_id, x, y, angle, active, hydrant_id, vehicle_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (placed_hose_id, x, y, angle, int(active), hydrant_id, vehicle_id),
-        )
+        if frontend_id:
+            con.execute(
+                """INSERT INTO placed_hose_ends
+                   (id, placed_hose_id, x, y, angle, active, hydrant_id, vehicle_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (frontend_id, placed_hose_id, x, y, angle, int(active), hydrant_id, vehicle_id),
+            )
+            end_id = frontend_id
+        else:
+            con.execute(
+                """INSERT INTO placed_hose_ends
+                   (placed_hose_id, x, y, angle, active, hydrant_id, vehicle_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (placed_hose_id, x, y, angle, int(active), hydrant_id, vehicle_id),
+            )
+            end_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
         con.commit()
-        end_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
         log_event(get_active_game_id(), "hq_hose_end_place", {
             "end_id": end_id, "hose_id": placed_hose_id,
             "hydrant_id": hydrant_id, "vehicle_id": vehicle_id,
         })
         logger.info("HQ HOSE_END CREATE: id=%s hose=%s hydrant=%s vehicle=%s",
                      end_id, placed_hose_id, hydrant_id, vehicle_id)
-        sync_hose_ends(get_active_game_id())
         return jsonify({"ok": True, "id": end_id})
     finally:
         con.close()
@@ -341,7 +349,6 @@ def update_hose_end():
         })
         logger.info("HQ HOSE_END UPDATE: id=%s active=%s hydrant=%s",
                      end_id, bool(new_active), new_hydrant_id)
-        sync_hose_ends(get_active_game_id())
         return jsonify({"ok": True})
     finally:
         con.close()
@@ -366,7 +373,6 @@ def delete_hose_end():
         con.commit()
         log_event(get_active_game_id(), "hq_hose_end_remove", {"end_id": end_id})
         logger.info("HQ HOSE_END DELETE: id=%s", end_id)
-        sync_hose_ends(get_active_game_id())
         return jsonify({"ok": True})
     finally:
         con.close()

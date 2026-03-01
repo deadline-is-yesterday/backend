@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import math
 
-from headquarters.models import get_game_db
+from firemap.models import get_game_db
 from . import state
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,12 @@ def sync_hose_ends(game_id: str) -> None:
     - Все активные hose_ends → Nozzle (координаты пересчитаны в клетки сетки).
     - Удаляет vehicle_* FireTrucks, у которых больше нет hose_ends.
     """
+    # Ищем симуляцию: сначала по game_id напрямую, затем через маппинг
     sim = state.simulations.get(game_id)
+    if sim is None:
+        mapped_id = state.game_to_map.get(game_id)
+        if mapped_id:
+            sim = state.simulations.get(mapped_id)
     if sim is None:
         return
 
