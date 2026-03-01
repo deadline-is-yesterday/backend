@@ -168,19 +168,57 @@ def load_equipment(game_id: str | None = None) -> list[Equipment]:
     finally:
         con.close()
 
-MAPS: dict[str, FireMap] = {
-    "default": FireMap(
-        id="default",
-        name="Объект: Склад №4",
-        plan_url="/firemap/maps/default/plan.png",
-        scale_m_per_px=0.5,
-        hydrants=[
-            Hydrant("hydrant_001", 320, 215, "ПГ-1"),
-            Hydrant("hydrant_002", 640, 430, "ПГ-2"),
-            Hydrant("hydrant_003", 180, 500, "ПГ-3"),
-        ],
-    )
-}
+def load_map(game_id: str | None = None) -> FireMap | None:
+    """Load the map for the given game from its DB."""
+    gid = game_id or get_active_game_id()
+    con = get_game_db(gid)
+    try:
+        row = con.execute("SELECT * FROM maps WHERE id = 1").fetchone()
+        if row is None:
+            return None
 
-# in-memory layout storage: map_id -> layout dict | None
-LAYOUTS: dict[str, Any] = {}
+        hydrant_rows = con.execute("SELECT * FROM hydrants ORDER BY id").fetchall()
+        hydrants = [
+            Hydrant(id=str(h["id"]), x=h["x"], y=h["y"], label=h["label"])
+            for h in hydrant_rows
+        ]
+
+        return FireMap(
+            id="1",
+            name=row["name"],
+            plan_url="/firemap/maps/plan.png",
+            scale_m_per_px=row["scale_m_per_px"],
+            hydrants=hydrants,
+        )
+    finally:
+        con.close()
+
+
+def load_layout(game_id: str | None = None) -> dict:
+    """Load the layout JSON from the game DB."""
+    gid = game_id or get_active_game_id()
+    con = get_game_db(gid)
+    try:
+        row = con.execute("SELECT data FROM layouts WHERE id = 1").fetchone()
+        if row is None:
+            return {}
+        import json
+        return json.loads(row["data"])
+    finally:
+        con.close()
+
+
+def save_layout(layout: dict, game_id: str | None = None) -> None:
+    """Save the layout JSON to the game DB."""
+    gid = game_id or get_active_game_id()
+    con = get_game_db(gid)
+    try:
+        import json
+        data = json.dumps(layout, ensure_ascii=False)
+        con.execute(
+            "INSERT OR REPLACE INTO layouts (id, data) VALUES (1, ?)",
+            (data,),
+        )
+        con.commit()
+    finally:
+        con.close()

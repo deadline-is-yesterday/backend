@@ -2,7 +2,14 @@ import os
 
 from flask import Blueprint, jsonify, request, send_from_directory
 
-from .models import LAYOUTS, MAPS, get_active_game_id, get_game_db, load_equipment
+from .models import (
+    get_active_game_id,
+    get_game_db,
+    load_equipment,
+    load_layout,
+    load_map,
+    save_layout,
+)
 
 bp = Blueprint("firemap", __name__, url_prefix="/firemap")
 
@@ -56,19 +63,24 @@ def get_all_equipment():
 
 # ── Maps ──────────────────────────────────────────────────────────────────────
 
-@bp.get("/maps/<map_id>")
-def get_map(map_id: str):
-    fire_map = MAPS.get(map_id)
+@bp.get("/maps")
+def get_map():
+    fire_map = load_map()
     if fire_map is None:
         return jsonify({"error": "map not found"}), 404
     return jsonify(fire_map.to_dict())
 
 
-@bp.get("/maps/<map_id>/plan.png")
-def get_plan(map_id: str):
-    if map_id not in MAPS:
+@bp.get("/maps/plan.png")
+def get_plan():
+    con = get_game_db(get_active_game_id())
+    try:
+        row = con.execute("SELECT plan_filename FROM maps WHERE id = 1").fetchone()
+    finally:
+        con.close()
+    if row is None:
         return jsonify({"error": "map not found"}), 404
-    return send_from_directory(_PLANS_DIR, f"{map_id}.png")
+    return send_from_directory(_PLANS_DIR, row["plan_filename"])
 
 
 # ── Icons ─────────────────────────────────────────────────────────────────────
@@ -80,16 +92,12 @@ def get_icon(icon_path: str):
 
 # ── Layout ────────────────────────────────────────────────────────────────────
 
-@bp.get("/maps/<map_id>/layout")
-def get_layout(map_id: str):
-    if map_id not in MAPS:
-        return jsonify({"error": "map not found"}), 404
-    return jsonify(LAYOUTS.get(map_id))
+@bp.get("/maps/layout")
+def get_layout():
+    return jsonify(load_layout())
 
 
-@bp.post("/maps/<map_id>/layout")
-def save_layout(map_id: str):
-    if map_id not in MAPS:
-        return jsonify({"error": "map not found"}), 404
-    LAYOUTS[map_id] = request.get_json()
+@bp.post("/maps/layout")
+def post_layout():
+    save_layout(request.get_json())
     return jsonify({"ok": True})
