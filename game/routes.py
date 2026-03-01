@@ -17,6 +17,10 @@ from firemap.models import (
 from headquarters.models import ensure_game_db as ensure_headquarters_game_db
 
 from game.logger import log_event
+from firesim.engine import FireSystem
+from firesim import state as sim_state
+from firesim.events import start_tick_loop, stop_tick_loop
+from firesim.water_sync import sync_hose_ends
 
 logger = logging.getLogger(__name__)
 bp = Blueprint("game", __name__, url_prefix="/game")
@@ -110,23 +114,54 @@ def game_status():
 
 @bp.put("/status")
 def update_game_status():
-    """Update the is_running flag."""
+    """Update the is_running flag. Starts/stops fire simulation."""
     data = request.get_json(silent=True) or {}
     is_running = data.get("is_running", False)
     _set_system("is_running", "1" if is_running else "0")
 
-    # Reset all roles when stopping the game
-    if not is_running:
-        game_id = get_active_game_id()
-        if game_id:
-            con = get_game_db(game_id)
-            try:
-                con.execute("UPDATE roles SET occupied = 0, sid = NULL")
-                con.commit()
-            finally:
-                con.close()
+    game_id = get_active_game_id()
 
-    log_event(get_active_game_id(), "simulation_start" if is_running else "simulation_stop")
+    if is_running and game_id:
+        # ── Создаём серверную симуляцию из grid ──────────────────────
+        con = get_game_db(game_id)
+        try:
+            grid_row = con.execute(
+                "SELECT resolution, grid_rows, grid_data FROM grid_state WHERE id = 1"
+            ).fetchone()
+            if grid_row:
+                resolution = grid_row["resolution"]
+                grid_rows = grid_row["grid_rows"]
+                grid = json.loads(grid_row["grid_data"])
+
+                sim = FireSystem(resolution, grid_rows)
+                for y, row in enumerate(grid):
+                    for x, cell in enumerate(row):
+                        if cell == "wall":
+                            sim.set_wall(x, y, -100)
+                        elif cell == "fire":
+                            sim.set_source(x, y, 1000)
+
+                sim_state.simulations[game_id] = sim
+                sync_hose_ends(game_id)
+                start_tick_loop(game_id)
+                logger.info("Fire sim started for game %s (%dx%d)", game_id, resolution, grid_rows)
+        finally:
+            con.close()
+
+    # Reset all roles and stop sim when stopping the game
+    if not is_running and game_id:
+        stop_tick_loop(game_id)
+        sim_state.simulations.pop(game_id, None)
+        sim_state.tick_rates.pop(game_id, None)
+
+        con = get_game_db(game_id)
+        try:
+            con.execute("UPDATE roles SET occupied = 0, sid = NULL")
+            con.commit()
+        finally:
+            con.close()
+
+    log_event(game_id, "simulation_start" if is_running else "simulation_stop")
     logger.info("GAME STATUS: is_running=%s", is_running)
     return jsonify({"ok": True})
 

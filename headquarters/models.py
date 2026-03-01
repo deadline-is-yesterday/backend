@@ -106,6 +106,24 @@ def ensure_game_db(game_id: str) -> str:
         os.makedirs(_GAMES_DIR, exist_ok=True)
         shutil.copy2(_TEMPLATE_DB, path)
         logger.info("Created HQ game DB: %s", path)
+    # Миграция: таблица placed_hose_ends (могла отсутствовать в старых копиях)
+    con = sqlite3.connect(path)
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS placed_hose_ends (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            placed_hose_id INTEGER NOT NULL,
+            x REAL NOT NULL, y REAL NOT NULL,
+            angle REAL NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 0,
+            hydrant_id INTEGER,
+            vehicle_id INTEGER,
+            FOREIGN KEY(placed_hose_id) REFERENCES placed_hoses(id) ON DELETE CASCADE,
+            FOREIGN KEY(hydrant_id) REFERENCES hydrants(id),
+            FOREIGN KEY(vehicle_id) REFERENCES vehicles(id)
+        )"""
+    )
+    con.commit()
+    con.close()
     return path
 
 

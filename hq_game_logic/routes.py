@@ -3,6 +3,7 @@ import logging
 from flask import Blueprint, jsonify, request
 from headquarters.models import get_active_game_id, get_game_db
 from game.logger import log_event
+from firesim.water_sync import sync_hose_ends
 
 logger = logging.getLogger(__name__)
 bp = Blueprint("hq_game_logic", __name__, url_prefix="/hq_game_logic")
@@ -299,6 +300,7 @@ def create_hose_end():
         })
         logger.info("HQ HOSE_END CREATE: id=%s hose=%s hydrant=%s vehicle=%s",
                      end_id, placed_hose_id, hydrant_id, vehicle_id)
+        sync_hose_ends(get_active_game_id())
         return jsonify({"ok": True, "id": end_id})
     finally:
         con.close()
@@ -339,6 +341,7 @@ def update_hose_end():
         })
         logger.info("HQ HOSE_END UPDATE: id=%s active=%s hydrant=%s",
                      end_id, bool(new_active), new_hydrant_id)
+        sync_hose_ends(get_active_game_id())
         return jsonify({"ok": True})
     finally:
         con.close()
@@ -363,6 +366,7 @@ def delete_hose_end():
         con.commit()
         log_event(get_active_game_id(), "hq_hose_end_remove", {"end_id": end_id})
         logger.info("HQ HOSE_END DELETE: id=%s", end_id)
+        sync_hose_ends(get_active_game_id())
         return jsonify({"ok": True})
     finally:
         con.close()

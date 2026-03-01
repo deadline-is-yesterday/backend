@@ -101,25 +101,80 @@ from typing import Any
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Nozzle — ствол (конец рукава)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class Nozzle:
+    """Ствол (конец рукава) — точка, из которой льётся вода.
+
+    Attributes:
+        id:         Уникальный идентификатор ствола (str).
+        x, y:       Позиция на сетке (в клетках).
+        angle:      Направление струи в радианах (0 = вправо, π/2 = вниз).
+        spread_deg: Угол конуса распыления (градусы, макс. 90).
+        is_open:    True — вода подаётся, False — перекрыт.
+    """
+
+    __slots__ = ("id", "x", "y", "angle", "spread_deg", "is_open")
+
+    def __init__(
+        self,
+        nozzle_id: str,
+        x: float,
+        y: float,
+        angle: float = 0.0,
+        spread_deg: float = 45.0,
+        is_open: bool = False,
+    ) -> None:
+        self.id: str = nozzle_id
+        self.x: float = x
+        self.y: float = y
+        self.angle: float = angle
+        self.spread_deg: float = min(spread_deg, 90.0)
+        self.is_open: bool = is_open
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "x": round(self.x, 2),
+            "y": round(self.y, 2),
+            "angle": round(self.angle, 4),
+            "spread_deg": self.spread_deg,
+            "is_open": self.is_open,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  FireTruck — пожарная машина
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class FireTruck:
-    """Пожарная машина с запасом воды и рукавом.
+    """Пожарная машина с запасом воды и стволами.
+
+    У машины есть бак воды (water / max_water), к ней подключаются
+    стволы (nozzles). Все стволы одной машины делят один бак.
+
+    Для обратной совместимости поддерживается также одиночный legacy-ствол
+    (nozzle_x, nozzle_y, hose_open).
 
     Attributes:
-        id:        Уникальный идентификатор машины (str).
-        x, y:      Позиция машины на сетке.
-        water:     Остаток воды в литрах (по умолч. 2400).
-        nozzle_x:  X-координата конца рукава (сопла). None если рукав не развёрнут.
-        nozzle_y:  Y-координата конца рукава (сопла). None если рукав не развёрнут.
-        hose_open: True — вода подаётся, False — рукав перекрыт.
+        id:               Уникальный идентификатор машины (str).
+        x, y:             Позиция машины на сетке.
+        water:            Остаток воды в литрах (по умолч. 2400).
+        max_water:        Ёмкость бака (литры).
+        nozzles:          Список стволов (Nozzle), подключённых к этой машине.
+        hydrant_connected: True — машина подключена к гидранту (бак пополняется).
+        nozzle_x:         (legacy) X-координата одиночного сопла.
+        nozzle_y:         (legacy) Y-координата одиночного сопла.
+        hose_open:        (legacy) Открыт ли одиночный рукав.
     """
 
     __slots__ = (
         "id", "x", "y", "water", "max_water",
         "nozzle_x", "nozzle_y", "hose_open", "hydrant_connected",
+        "nozzles",
     )
 
     def __init__(self, truck_id: str, x: int, y: int, water: float = 2400) -> None:
@@ -132,6 +187,7 @@ class FireTruck:
         self.nozzle_y: int | None = None
         self.hose_open: bool = False
         self.hydrant_connected: bool = False
+        self.nozzles: list[Nozzle] = []
 
     def to_dict(self) -> dict[str, Any]:
         """Сериализация машины в словарь для JSON."""
@@ -148,6 +204,8 @@ class FireTruck:
             d["hose_end"] = {"x": self.nozzle_x, "y": self.nozzle_y}
         else:
             d["hose_end"] = None
+        if self.nozzles:
+            d["nozzles"] = [n.to_dict() for n in self.nozzles]
         return d
 
 
@@ -257,12 +315,41 @@ class FireSystem:
     def set_hydrant_connected(self, truck_id: str, connected: bool) -> None:
         """Установить подключение машины к гидранту.
 
-        Когда подключён гидрант и рукав не поливает, бак пополняется.
+        Когда подключён гидрант, бак пополняется (даже во время тушения).
         """
         truck = self.firetrucks.get(truck_id)
         if truck is None:
             return
         truck.hydrant_connected = connected
+
+    # ── Управление стволами (Nozzle) ────────────────────────────────────────
+
+    def sync_nozzles(
+        self, truck_id: str, nozzles_data: list[dict[str, Any]]
+    ) -> None:
+        """Полная синхронизация стволов машины.
+
+        Заменяет текущий список nozzles у машины на новый.
+
+        Args:
+            truck_id:     ID машины.
+            nozzles_data: Список словарей с ключами:
+                          id, x, y, angle, spread_deg, is_open.
+        """
+        truck = self.firetrucks.get(truck_id)
+        if truck is None:
+            return
+        truck.nozzles = [
+            Nozzle(
+                nozzle_id=str(nd["id"]),
+                x=nd["x"],
+                y=nd["y"],
+                angle=nd.get("angle", 0.0),
+                spread_deg=nd.get("spread_deg", 45.0),
+                is_open=nd.get("is_open", False),
+            )
+            for nd in nozzles_data
+        ]
 
     # ── Проверка проходимости луча ───────────────────────────────────────────
 
@@ -392,6 +479,70 @@ class FireSystem:
         # Шаг 4: списываем воду
         truck.water = max(0.0, truck.water - water_used)
 
+    def _apply_water_from_nozzle(
+        self,
+        truck: FireTruck,
+        nozzle: Nozzle,
+        radius: int = 8,
+        amount: float = 100,
+    ) -> None:
+        """Применить воду от одного ствола (Nozzle).
+
+        В отличие от _apply_water_from_truck, направление берётся из
+        nozzle.angle (а не вычисляется по ближайшему огню).
+
+        Args:
+            truck:  Машина, из бака которой расходуется вода.
+            nozzle: Ствол с координатами и направлением.
+            radius: Радиус действия воды (в клетках).
+            amount: Сила тушения за тик.
+        """
+        if truck.water <= 0:
+            return
+
+        nx = nozzle.x
+        ny = nozzle.y
+        main_angle = nozzle.angle  # радианы
+        half_spread_rad = math.radians(nozzle.spread_deg / 2)
+
+        water_used = 0.0
+
+        for y in range(self.height):
+            for x in range(self.width):
+                if truck.water - water_used <= 0:
+                    break
+
+                dx = x - nx
+                dy = y - ny
+                dist = math.hypot(dx, dy)
+
+                if dist > radius or dist < 0.01:
+                    continue
+
+                cell_angle = math.atan2(dy, dx)
+                diff = (cell_angle - main_angle + math.pi) % (2 * math.pi) - math.pi
+                if abs(diff) > half_spread_rad:
+                    continue
+
+                if self.grid[y][x] < 0:
+                    continue
+                if self.is_path_blocked(int(round(nx)), int(round(ny)), x, y):
+                    continue
+
+                self.active_water[(x, y)] = True
+
+                if self.grid[y][x] > 0:
+                    reduction = min(amount, self.grid[y][x])
+                    self.grid[y][x] = round(max(0.0, self.grid[y][x] - amount), 2)
+                    water_used += reduction
+
+                if (x, y) in self.sources:
+                    self.sources[(x, y)] = max(
+                        0.0, self.sources[(x, y)] - amount * 0.5
+                    )
+
+        truck.water = max(0.0, truck.water - water_used)
+
     # ── Основной тик ─────────────────────────────────────────────────────────
 
     def update(self) -> bool:
@@ -416,13 +567,19 @@ class FireSystem:
         # ── Фаза 0: пополнение бака от гидранта ───────────────────────
         _HYDRANT_REFILL_RATE = 200  # литров за тик
         for truck in self.firetrucks.values():
-            if truck.hydrant_connected and not truck.hose_open:
+            if truck.hydrant_connected:
                 truck.water = min(truck.max_water, truck.water + _HYDRANT_REFILL_RATE)
 
         # ── Фаза 1: тушение ─────────────────────────────────────────────
         self.active_water.clear()
         for truck in self.firetrucks.values():
-            if truck.hose_open:
+            # Мультисопловой режим (nozzles)
+            if truck.nozzles:
+                for nozzle in truck.nozzles:
+                    if nozzle.is_open and truck.water > 0:
+                        self._apply_water_from_nozzle(truck, nozzle)
+            # Legacy: одиночный ствол
+            elif truck.hose_open:
                 if truck.water <= 0:
                     truck.hose_open = False
                     continue
