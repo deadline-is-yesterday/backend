@@ -1,9 +1,13 @@
+import logging
+
 from flask import Blueprint, jsonify, request
 
 from .engine import FireSystem
+from .events import stop_tick_loop
 from . import state
-from .events import start_tick_loop, stop_tick_loop
 
+
+logger = logging.getLogger(__name__)
 bp = Blueprint("firesim", __name__, url_prefix="/firesim")
 
 
