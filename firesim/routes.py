@@ -58,9 +58,12 @@ def start_simulation():
 
     # Привязываем active game_id к map_id для sync_hose_ends
     from firemap.models import get_active_game_id
+    from .water_sync import sync_hose_ends
     try:
         gid = get_active_game_id()
         state.game_to_map[gid] = map_id
+        # Подгружаем существующие стволы из БД в симуляцию
+        sync_hose_ends(gid)
     except Exception:
         pass
 
