@@ -130,3 +130,20 @@ class FireSimNamespace(Namespace):
             truck_id, nozzle_x, nozzle_y, is_open, map_id,
         )
 
+    # ── Hydrant connection ────────────────────────────────────────────
+
+    def on_hydrant_update(self, data: dict) -> None:
+        map_id = data.get("map_id", "default")
+        truck_id = data.get("truck_id")
+        connected = data.get("connected", False)
+
+        sim = state.simulations.get(map_id)
+        if sim is None or truck_id is None:
+            return
+
+        sim.set_hydrant_connected(truck_id, connected)
+        logger.debug(
+            "hydrant %s: connected=%s in %s",
+            truck_id, connected, map_id,
+        )
+

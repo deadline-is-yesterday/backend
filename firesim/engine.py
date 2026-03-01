@@ -118,16 +118,21 @@ class FireTruck:
         hose_open: True — вода подаётся, False — рукав перекрыт.
     """
 
-    __slots__ = ("id", "x", "y", "water", "nozzle_x", "nozzle_y", "hose_open")
+    __slots__ = (
+        "id", "x", "y", "water", "max_water",
+        "nozzle_x", "nozzle_y", "hose_open", "hydrant_connected",
+    )
 
     def __init__(self, truck_id: str, x: int, y: int, water: float = 2400) -> None:
         self.id: str = truck_id
         self.x: int = x
         self.y: int = y
         self.water: float = water
+        self.max_water: float = water  # ёмкость бака = начальный запас
         self.nozzle_x: int | None = None
         self.nozzle_y: int | None = None
         self.hose_open: bool = False
+        self.hydrant_connected: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Сериализация машины в словарь для JSON."""
@@ -136,7 +141,9 @@ class FireTruck:
             "x": self.x,
             "y": self.y,
             "water": round(self.water, 2),
+            "max_water": round(self.max_water, 2),
             "hose_open": self.hose_open,
+            "hydrant_connected": self.hydrant_connected,
         }
         if self.nozzle_x is not None and self.nozzle_y is not None:
             d["hose_end"] = {"x": self.nozzle_x, "y": self.nozzle_y}
@@ -190,7 +197,10 @@ class FireSystem:
             wall_type: Отрицательное число = прочность стены.
                        Например, -100 = очень прочная, -10 = слабая.
         """
-        self.grid[y][x] = wall_type
+        # Если на этой клетке был источник — убираем его
+        self.sources.pop((x, y), None)
+        # Гарантируем, что стена всегда имеет отрицательное значение
+        self.grid[y][x] = -abs(wall_type) if wall_type != 0 else -30
 
     def set_source(self, x: int, y: int, intensity: int = 1000) -> None:
         """Установить источник огня.
@@ -199,6 +209,9 @@ class FireSystem:
             x, y:      Координаты клетки.
             intensity: Начальная интенсивность (по умолч. 1000).
         """
+        # Нельзя ставить очаг на стену
+        if self.grid[y][x] < 0:
+            return
         self.sources[(x, y)] = intensity
         self.grid[y][x] = intensity
 
@@ -241,6 +254,16 @@ class FireSystem:
         truck.nozzle_x = nozzle_x
         truck.nozzle_y = nozzle_y
         truck.hose_open = is_open
+
+    def set_hydrant_connected(self, truck_id: str, connected: bool) -> None:
+        """Установить подключение машины к гидранту.
+
+        Когда подключён гидрант и рукав не поливает, бак пополняется.
+        """
+        truck = self.firetrucks.get(truck_id)
+        if truck is None:
+            return
+        truck.hydrant_connected = connected
 
     # ── Проверка проходимости луча ───────────────────────────────────────────
 
@@ -392,10 +415,19 @@ class FireSystem:
         if self.ticks % self.speed_n != 0:
             return False
 
+        # ── Фаза 0: пополнение бака от гидранта ───────────────────────
+        _HYDRANT_REFILL_RATE = 200  # литров за тик
+        for truck in self.firetrucks.values():
+            if truck.hydrant_connected and not truck.hose_open:
+                truck.water = min(truck.max_water, truck.water + _HYDRANT_REFILL_RATE)
+
         # ── Фаза 1: тушение ─────────────────────────────────────────────
         self.active_water.clear()
         for truck in self.firetrucks.values():
             if truck.hose_open:
+                if truck.water <= 0:
+                    truck.hose_open = False
+                    continue
                 self._apply_water_from_truck(truck)
 
         # ── Фаза 2: распространение огня ────────────────────────────────
@@ -405,8 +437,27 @@ class FireSystem:
             for x in range(self.width):
                 current = self.grid[y][x]
 
+                # --- Стена: разрушается от огня ---
+                if current < 0:
+                    has_fire_neighbor = False
+                    for dx in [-1, 0, 1]:
+                        for dy in [-1, 0, 1]:
+                            if dx == 0 and dy == 0:
+                                continue
+                            nx, ny = x + dx, y + dy
+                            if 0 <= nx < self.width and 0 <= ny < self.height:
+                                if self.grid[ny][nx] > 0:
+                                    has_fire_neighbor = True
+                                    break
+                        if has_fire_neighbor:
+                            break
+                    if has_fire_neighbor:
+                        new_grid[y][x] = current + 1  # приближается к 0
+                    else:
+                        new_grid[y][x] = current
+
                 # --- Источник огня ---
-                if (x, y) in self.sources:
+                elif (x, y) in self.sources:
                     if self.sources[(x, y)] > 0:
                         # Источник разгорается
                         self.sources[(x, y)] += 1
@@ -417,7 +468,7 @@ class FireSystem:
 
                 # --- Обычная клетка (пол, воздух) ---
                 elif current >= 0:
-                    # Считаем среднее тепло от 8 соседей
+                    # Считаем среднее тепло от 8 соседей (квадрат 3x3 без центра)
                     surrounding_sum = 0.0
                     for dx in [-1, 0, 1]:
                         for dy in [-1, 0, 1]:
@@ -429,6 +480,10 @@ class FireSystem:
                                 if (nx, ny) not in self.active_water:
                                     val = self.grid[ny][nx]
                                     if val > 0:
+                                        # Диагональное распространение блокируется стеной в углу
+                                        if dx != 0 and dy != 0:
+                                            if self.grid[y][nx] < 0 or self.grid[ny][x] < 0:
+                                                continue
                                         surrounding_sum += val
 
                     calculated_mean = round(surrounding_sum / 8, 2)
@@ -439,28 +494,6 @@ class FireSystem:
                         new_temp += 1
 
                     new_grid[y][x] = round(new_temp, 2)
-
-                # --- Стена ---
-                elif current < 0:
-                    # Проверяем, есть ли огонь рядом
-                    is_near_fire = False
-                    for dx in [-1, 0, 1]:
-                        for dy in [-1, 0, 1]:
-                            if dx == 0 and dy == 0:
-                                continue
-                            nx, ny = x + dx, y + dy
-                            if 0 <= nx < self.width and 0 <= ny < self.height:
-                                if self.grid[ny][nx] > 0:
-                                    is_near_fire = True
-                                    break
-                        if is_near_fire:
-                            break
-
-                    if is_near_fire:
-                        # Стена разрушается (значение растёт к 0)
-                        new_grid[y][x] = current + 1
-                    else:
-                        new_grid[y][x] = current
 
         # ── Фаза 3: применяем новую сетку ───────────────────────────────
         self.grid = new_grid
