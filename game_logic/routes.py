@@ -2,6 +2,7 @@ import logging
 
 from flask import Blueprint, jsonify, request
 from firemap.models import get_active_game_id, get_game_db
+from headquarters.models import get_game_db as get_hq_db
 from game.logger import log_event
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,8 @@ def add_to_roster():
     if vehicle_id is None:
         return jsonify({"error": "id is required"}), 400
 
-    con = get_game_db(get_active_game_id())
+    game_id = get_active_game_id()
+    con = get_game_db(game_id)
     try:
         vehicle = con.execute("SELECT id FROM vehicles WHERE id = ?", (vehicle_id,)).fetchone()
         if vehicle is None:
@@ -31,7 +33,13 @@ def add_to_roster():
 
         con.execute("INSERT INTO fire_roster (vehicle_id) VALUES (?)", (vehicle_id,))
         con.commit()
-        log_event(get_active_game_id(), "roster_add", {"vehicle_id": vehicle_id})
+
+        hq_con = get_hq_db(game_id)
+        hq_con.execute("INSERT OR IGNORE INTO fire_roster (vehicle_id) VALUES (?)", (vehicle_id,))
+        hq_con.commit()
+        hq_con.close()
+
+        log_event(game_id, "roster_add", {"vehicle_id": vehicle_id})
         logger.info("ROSTER ADD: vehicle_id=%s", vehicle_id)
         return jsonify({"ok": True})
     finally:
@@ -47,7 +55,8 @@ def remove_from_roster():
     if vehicle_id is None:
         return jsonify({"error": "id is required"}), 400
 
-    con = get_game_db(get_active_game_id())
+    game_id = get_active_game_id()
+    con = get_game_db(game_id)
     try:
         existing = con.execute("SELECT id FROM fire_roster WHERE vehicle_id = ?", (vehicle_id,)).fetchone()
         if existing is None:
@@ -56,11 +65,73 @@ def remove_from_roster():
         con.execute("DELETE FROM placed_cars WHERE vehicle_id = ?", (vehicle_id,))
         con.execute("DELETE FROM fire_roster WHERE vehicle_id = ?", (vehicle_id,))
         con.commit()
-        log_event(get_active_game_id(), "roster_remove", {"vehicle_id": vehicle_id})
+
+        hq_con = get_hq_db(game_id)
+        hq_con.execute("DELETE FROM placed_cars WHERE vehicle_id = ?", (vehicle_id,))
+        hq_con.execute("DELETE FROM fire_roster WHERE vehicle_id = ?", (vehicle_id,))
+        hq_con.commit()
+        hq_con.close()
+
+        log_event(game_id, "roster_remove", {"vehicle_id": vehicle_id})
         logger.info("ROSTER REMOVE: vehicle_id=%s", vehicle_id)
         return jsonify({"ok": True})
     finally:
         con.close()
+
+
+@bp.post("/dispatch")
+def dispatch_vehicles():
+    """Batch-добавление машин в fire_roster по типам.
+
+    Body: {"vehicles": {"АЦ-40 (130)": 3, ...}, "address": "ул. ..."}
+    Подбирает N свободных машин каждого типа и добавляет в fire_roster.
+    """
+    data = request.get_json()
+    vehicles_map = data.get("vehicles", {})
+    address = data.get("address", "")
+
+    if not vehicles_map:
+        return jsonify({"error": "vehicles is required"}), 400
+
+    game_id = get_active_game_id()
+    con = get_game_db(game_id)
+    hq_con = get_hq_db(game_id)
+    added: list[dict] = []
+    try:
+        for type_key, count in vehicles_map.items():
+            if count <= 0:
+                continue
+            # Подбираем свободные машины данного типа (не в roster)
+            rows = con.execute(
+                """SELECT v.id, v.model_name
+                   FROM vehicles v
+                   WHERE TRIM(SUBSTR(v.model_name, 1, INSTR(v.model_name, '#') - 1)) = ?
+                     AND v.id NOT IN (SELECT vehicle_id FROM fire_roster)
+                   LIMIT ?""",
+                (type_key, count),
+            ).fetchall()
+            for row in rows:
+                con.execute(
+                    "INSERT INTO fire_roster (vehicle_id) VALUES (?)", (row[0],)
+                )
+                hq_con.execute(
+                    "INSERT OR IGNORE INTO fire_roster (vehicle_id) VALUES (?)",
+                    (row[0],),
+                )
+                added.append({"id": row[0], "model_name": row[1]})
+
+        con.commit()
+        hq_con.commit()
+        log_event(game_id, "dispatch", {
+            "address": address,
+            "requested": vehicles_map,
+            "added": [a["id"] for a in added],
+        })
+        logger.info("DISPATCH: address=%s, added=%d vehicles", address, len(added))
+        return jsonify({"ok": True, "dispatched": added})
+    finally:
+        con.close()
+        hq_con.close()
 
 
 # ── Car endpoints ─────────────────────────────────────────────────────────────
