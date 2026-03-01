@@ -163,6 +163,14 @@ def update_game_status():
 
     log_event(game_id, "simulation_start" if is_running else "simulation_stop")
     logger.info("GAME STATUS: is_running=%s", is_running)
+
+    # Уведомляем всех клиентов о смене статуса
+    from extensions import socketio
+    socketio.emit("game_status", {
+        "is_running": is_running,
+        "active_game_id": game_id,
+    })
+
     return jsonify({"ok": True})
 
 
