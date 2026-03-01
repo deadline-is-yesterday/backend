@@ -38,10 +38,6 @@ def create_app() -> Flask:
     game_logic.init_app(app)
     hq_game_logic.init_app(app)
 
-    @app.errorhandler(404)
-    def page_not_found(e):
-        return send_from_directory("firemap/plans", f"пепешнелефтв.png")
-
     return app
 
 
