@@ -15,7 +15,8 @@ bp = Blueprint("headquarters", __name__, url_prefix="/headquarters")
 
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _FRONTEND_ICONS_DIR = os.path.join(_BACKEND_DIR, "..", "frontend", "ICONS")
-_PLANS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plans")
+# _PLANS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plans")
+_PLANS_DIR = os.path.join("./firemap", "plans")
 
 
 # ── Equipment ─────────────────────────────────────────────────────────────────
@@ -73,14 +74,15 @@ def get_map():
 
 @bp.get("/maps/plan.png")
 def get_plan():
-    con = get_game_db(get_active_game_id())
-    try:
-        row = con.execute("SELECT plan_filename FROM maps WHERE id = 1").fetchone()
-    finally:
-        con.close()
-    if row is None:
-        return jsonify({"error": "map not found"}), 404
-    return send_from_directory(_PLANS_DIR, row["plan_filename"])
+    # con = get_game_db(get_active_game_id())
+    # try:
+    #     row = con.execute("SELECT plan_filename FROM maps WHERE id = 1").fetchone()
+    # finally:
+    #     con.close()
+    # if row is None:
+    #     return jsonify({"error": "map not found"}), 404
+    name = f"plan_{get_active_game_id()}.png"
+    return send_from_directory(_PLANS_DIR, name)
 
 
 # ── Icons ─────────────────────────────────────────────────────────────────────
