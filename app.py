@@ -7,6 +7,7 @@ from flask_cors import CORS
 from extensions import socketio
 import firemap
 import firesim
+import game
 import game_logic
 import headquarters
 import hq_game_logic
@@ -33,6 +34,7 @@ def create_app() -> Flask:
     headquarters.init_app(app)
     firesim.init_app(app)
     firesim.init_socketio(socketio)
+    game.init_app(app)
     game_logic.init_app(app)
     hq_game_logic.init_app(app)
 

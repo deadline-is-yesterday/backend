@@ -1,0 +1,429 @@
+import json
+import logging
+import os
+import sqlite3
+import uuid
+
+from flask import Blueprint, jsonify, request
+from werkzeug.utils import secure_filename
+
+from firemap.models import (
+    _GAMES_DIR,
+    _SYSTEM_DB,
+    ensure_game_db,
+    get_active_game_id,
+    get_game_db,
+)
+
+logger = logging.getLogger(__name__)
+bp = Blueprint("game", __name__, url_prefix="/game")
+
+_PLANS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "firemap", "plans")
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def _system_db() -> sqlite3.Connection:
+    con = sqlite3.connect(_SYSTEM_DB)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _set_system(key: str, value: str) -> None:
+    con = _system_db()
+    try:
+        con.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def _get_system(key: str, default: str = "") -> str:
+    con = _system_db()
+    try:
+        row = con.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else default
+    finally:
+        con.close()
+
+
+# ── Game lifecycle ───────────────────────────────────────────────────────────
+
+@bp.post("")
+def create_game():
+    """Create a new game (copy template DB) and set it as active."""
+    data = request.get_json(silent=True) or {}
+    name = data.get("name", "")
+
+    game_id = str(uuid.uuid4())[:8]
+    ensure_game_db(game_id)
+    _set_system("active_game_id", game_id)
+    _set_system("is_running", "0")
+
+    con = _system_db()
+    try:
+        con.execute(
+            "INSERT INTO games (id, name, status) VALUES (?, ?, 'draft')",
+            (game_id, name),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    logger.info("GAME CREATE: %s (%s)", game_id, name)
+    return jsonify({"game_id": game_id}), 201
+
+
+@bp.get("/list")
+def list_games():
+    """Return all games ordered by creation date (newest first)."""
+    con = _system_db()
+    try:
+        rows = con.execute(
+            "SELECT id, name, created_at, status FROM games ORDER BY created_at DESC"
+        ).fetchall()
+        return jsonify([
+            {"id": r["id"], "name": r["name"], "created_at": r["created_at"], "status": r["status"]}
+            for r in rows
+        ])
+    finally:
+        con.close()
+
+
+@bp.get("/status")
+def game_status():
+    """Return active game id and running flag."""
+    return jsonify({
+        "active_game_id": get_active_game_id(),
+        "is_running": _get_system("is_running", "0") == "1",
+    })
+
+
+# ── Plan image ───────────────────────────────────────────────────────────────
+
+@bp.post("/plan")
+def upload_plan():
+    """Upload a floor plan image for the current active game."""
+    if "file" not in request.files:
+        return jsonify({"error": "file is required"}), 400
+
+    file = request.files["file"]
+    if not file.filename:
+        return jsonify({"error": "empty filename"}), 400
+
+    game_id = get_active_game_id()
+    ext = os.path.splitext(file.filename)[1] or ".png"
+    filename = secure_filename(f"plan_{game_id}{ext}")
+
+    os.makedirs(_PLANS_DIR, exist_ok=True)
+    filepath = os.path.join(_PLANS_DIR, filename)
+    file.save(filepath)
+
+    con = get_game_db(game_id)
+    try:
+        con.execute(
+            "INSERT OR REPLACE INTO maps (id, name, plan_filename, scale_m_per_px) "
+            "VALUES (1, 'plan', ?, 1.0)",
+            (filename,),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    logger.info("PLAN UPLOAD: game=%s file=%s", game_id, filename)
+    return jsonify({"plan_url": "/firemap/maps/plan.png", "filename": filename})
+
+
+# ── Grid state ───────────────────────────────────────────────────────────────
+
+@bp.get("/map")
+def get_map_grid():
+    """Load the grid state for the current active game."""
+    con = get_game_db(get_active_game_id())
+    try:
+        row = con.execute("SELECT * FROM grid_state WHERE id = 1").fetchone()
+        if row is None:
+            return jsonify({})
+        return jsonify({
+            "resolution": row["resolution"],
+            "grid_rows": row["grid_rows"],
+            "aspect_ratio": row["aspect_ratio"],
+            "grid": json.loads(row["grid_data"]),
+            "scale_m_per_px": row["scale_m_per_px"],
+        })
+    finally:
+        con.close()
+
+
+@bp.put("/map")
+def save_map_grid():
+    """Save the grid state for the current active game."""
+    data = request.get_json(silent=True) or {}
+
+    resolution = data.get("resolution")
+    grid_rows = data.get("grid_rows")
+    aspect_ratio = data.get("aspect_ratio")
+    grid = data.get("grid")
+
+    if not all([resolution, grid_rows, aspect_ratio, grid]):
+        return jsonify({"error": "resolution, grid_rows, aspect_ratio, grid are required"}), 400
+
+    scale = data.get("scale_m_per_px")
+
+    con = get_game_db(get_active_game_id())
+    try:
+        con.execute(
+            """INSERT OR REPLACE INTO grid_state
+               (id, resolution, grid_rows, aspect_ratio, grid_data, scale_m_per_px)
+               VALUES (1, ?, ?, ?, ?, ?)""",
+            (resolution, grid_rows, aspect_ratio, json.dumps(grid), scale),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    logger.info("GRID SAVE: %dx%d", resolution, grid_rows)
+    return jsonify({"ok": True})
+
+
+# ── Scenario ─────────────────────────────────────────────────────────────────
+
+@bp.get("/scenario")
+def get_scenario():
+    """Load scenario (environment conditions) for the current active game."""
+    con = get_game_db(get_active_game_id())
+    try:
+        row = con.execute("SELECT * FROM scenario WHERE id = 1").fetchone()
+        if row is None:
+            return jsonify({})
+        return jsonify({
+            "temperature": row["temperature"],
+            "wind_speed": row["wind_speed"],
+            "wind_direction": row["wind_direction"],
+            "target_address": row["target_address"],
+        })
+    finally:
+        con.close()
+
+
+@bp.put("/scenario")
+def save_scenario():
+    """Save scenario (environment conditions) for the current active game."""
+    data = request.get_json(silent=True) or {}
+
+    con = get_game_db(get_active_game_id())
+    try:
+        con.execute(
+            """INSERT OR REPLACE INTO scenario
+               (id, temperature, wind_speed, wind_direction, target_address)
+               VALUES (1, ?, ?, ?, ?)""",
+            (
+                data.get("temperature", 20.0),
+                data.get("wind_speed", 0.0),
+                data.get("wind_direction", 0),
+                data.get("target_address", ""),
+            ),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    logger.info("SCENARIO SAVE")
+    return jsonify({"ok": True})
+
+
+# ── Depot ────────────────────────────────────────────────────────────────────
+
+@bp.get("/depot")
+def get_depot():
+    """Load depot config: vehicle type counts derived from vehicles table."""
+    game_con = get_game_db(get_active_game_id())
+    try:
+        rows = game_con.execute(
+            """
+            SELECT
+                TRIM(SUBSTR(model_name, 1, INSTR(model_name, '#') - 1)) AS type_key,
+                COUNT(*) AS cnt
+            FROM vehicles
+            GROUP BY type_key
+            """
+        ).fetchall()
+        vehicles = {row["type_key"]: row["cnt"] for row in rows}
+        return jsonify({"vehicles": vehicles})
+    finally:
+        game_con.close()
+
+
+@bp.put("/depot")
+def save_depot():
+    """Reconcile vehicles table to match desired counts per type."""
+    data = request.get_json(silent=True) or {}
+    vehicles = data.get("vehicles", {})
+
+    game_id = get_active_game_id()
+    game_con = get_game_db(game_id)
+    try:
+        game_con.execute("PRAGMA foreign_keys = ON")
+
+        for type_key, desired in vehicles.items():
+            desired = max(0, int(desired))
+
+            # Current vehicles of this type
+            current_rows = game_con.execute(
+                "SELECT id, model_name FROM vehicles WHERE model_name LIKE ? ORDER BY id",
+                (f"{type_key} #%",),
+            ).fetchall()
+            current = len(current_rows)
+
+            if desired == current:
+                continue
+
+            if desired > current:
+                # Find max number suffix
+                max_num = 0
+                for r in current_rows:
+                    try:
+                        num = int(r["model_name"].rsplit("#", 1)[1])
+                        max_num = max(max_num, num)
+                    except (IndexError, ValueError):
+                        pass
+
+                # Get specs from first vehicle (or from system vehicle_types)
+                ref = current_rows[0] if current_rows else None
+                if ref:
+                    ref_row = game_con.execute(
+                        "SELECT * FROM vehicles WHERE id = ?", (ref["id"],)
+                    ).fetchone()
+                else:
+                    # No vehicles of this type exist — get specs from system.db
+                    sys_con = _system_db()
+                    try:
+                        t = sys_con.execute(
+                            "SELECT * FROM vehicle_types WHERE key = ?", (type_key,)
+                        ).fetchone()
+                    finally:
+                        sys_con.close()
+                    ref_row = t  # will use system specs
+
+                for i in range(current + 1, desired + 1):
+                    num = max_num + (i - current)
+                    new_name = f"{type_key} #{num}"
+
+                    if ref and ref_row:
+                        game_con.execute(
+                            """INSERT INTO vehicles
+                               (model_name, water_capacity_l, foam_capacity_l,
+                                pump_flow_ls, crew_size, ladder_height_m)
+                               VALUES (?, ?, ?, ?, ?, ?)""",
+                            (
+                                new_name,
+                                ref_row["water_capacity_l"],
+                                ref_row["foam_capacity_l"],
+                                ref_row["pump_flow_ls"],
+                                ref_row["crew_size"],
+                                ref_row["ladder_height_m"],
+                            ),
+                        )
+                    else:
+                        # From system vehicle_types
+                        game_con.execute(
+                            """INSERT INTO vehicles
+                               (model_name, water_capacity_l, foam_capacity_l,
+                                pump_flow_ls, crew_size, ladder_height_m)
+                               VALUES (?, ?, ?, ?, ?, ?)""",
+                            (
+                                new_name,
+                                ref_row["water_capacity_l"] if ref_row else 0,
+                                ref_row["foam_capacity_l"] if ref_row else 0,
+                                ref_row["pump_flow_ls"] if ref_row else 0,
+                                ref_row["crew_size"] if ref_row else 0,
+                                ref_row["ladder_height_m"] if ref_row else 0,
+                            ),
+                        )
+
+                    new_id = game_con.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+                    # Copy hose/nozzle links from first vehicle
+                    if ref:
+                        for link in game_con.execute(
+                            "SELECT hose_type_id, count FROM link_vehicle_hoses WHERE vehicle_id = ?",
+                            (ref["id"],),
+                        ).fetchall():
+                            game_con.execute(
+                                "INSERT INTO link_vehicle_hoses (vehicle_id, hose_type_id, count) VALUES (?, ?, ?)",
+                                (new_id, link["hose_type_id"], link["count"]),
+                            )
+                        for link in game_con.execute(
+                            "SELECT nozzle_type_id, count FROM link_vehicle_nozzles WHERE vehicle_id = ?",
+                            (ref["id"],),
+                        ).fetchall():
+                            game_con.execute(
+                                "INSERT INTO link_vehicle_nozzles (vehicle_id, nozzle_type_id, count) VALUES (?, ?, ?)",
+                                (new_id, link["nozzle_type_id"], link["count"]),
+                            )
+
+            elif desired < current:
+                # Delete vehicles with highest IDs (CASCADE removes links)
+                to_delete = current - desired
+                ids = [r["id"] for r in current_rows[-to_delete:]]
+                game_con.execute(
+                    f"DELETE FROM vehicles WHERE id IN ({','.join('?' * len(ids))})",
+                    ids,
+                )
+
+        game_con.commit()
+    finally:
+        game_con.close()
+
+    logger.info("DEPOT SAVE (reconcile): %d types", len(vehicles))
+    return jsonify({"ok": True})
+
+
+# ── Vehicle types ────────────────────────────────────────────────────────────
+
+@bp.get("/vehicle_types")
+def get_vehicle_types():
+    """Return vehicle types from reference table with current counts from game."""
+    # Types from reference table (system.db)
+    sys_con = _system_db()
+    try:
+        types = sys_con.execute(
+            "SELECT * FROM vehicle_types ORDER BY id"
+        ).fetchall()
+    finally:
+        sys_con.close()
+
+    # Current counts from game vehicles table
+    game_con = get_game_db(get_active_game_id())
+    try:
+        counts_rows = game_con.execute(
+            """
+            SELECT
+                TRIM(SUBSTR(model_name, 1, INSTR(model_name, '#') - 1)) AS type_key,
+                COUNT(*) AS cnt
+            FROM vehicles
+            GROUP BY type_key
+            """
+        ).fetchall()
+        counts = {row["type_key"]: row["cnt"] for row in counts_rows}
+    finally:
+        game_con.close()
+
+    return jsonify([
+        {
+            "key": t["key"],
+            "name": t["key"],
+            "water_capacity_l": t["water_capacity_l"],
+            "foam_capacity_l": t["foam_capacity_l"],
+            "pump_flow_ls": t["pump_flow_ls"],
+            "crew_size": t["crew_size"],
+            "ladder_height_m": t["ladder_height_m"],
+            "count": counts.get(t["key"], 0),
+        }
+        for t in types
+    ])
