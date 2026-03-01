@@ -8,6 +8,8 @@ from extensions import socketio
 import firemap
 import firesim
 import game_logic
+import headquarters
+import hq_game_logic
 import radio
 
 import logging
@@ -28,9 +30,11 @@ def create_app() -> Flask:
     socketio.init_app(app, cors_allowed_origins="*", async_mode="eventlet")
     radio.init_app(socketio)
     firemap.init_app(app)
+    headquarters.init_app(app)
     firesim.init_app(app)
     firesim.init_socketio(socketio)
     game_logic.init_app(app)
+    hq_game_logic.init_app(app)
 
     @app.errorhandler(404)
     def page_not_found(e):
