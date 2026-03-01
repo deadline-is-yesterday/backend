@@ -3,8 +3,30 @@ from flask_socketio import Namespace, emit
 import logging
 
 from extensions import socketio
+from firemap.models import get_active_game_id, get_game_db
 
 logger = logging.getLogger(__name__)
+
+
+def _release_role_by_sid(sid: str) -> None:
+    """Release any game role occupied by this SocketIO session."""
+    try:
+        game_id = get_active_game_id()
+        if not game_id:
+            return
+        con = get_game_db(game_id)
+        try:
+            cur = con.execute(
+                "UPDATE roles SET occupied = 0, sid = NULL WHERE sid = ?",
+                (sid,),
+            )
+            con.commit()
+            if cur.rowcount > 0:
+                logger.info("ROLE RELEASED on disconnect: sid=%s", sid)
+        finally:
+            con.close()
+    except Exception:
+        logger.exception("Failed to release role for sid=%s", sid)
 
 
 class RadioNamespace(Namespace):
@@ -47,6 +69,7 @@ class RadioNamespace(Namespace):
         logger.info("disconnect: sid=%s", sid)
         if sid in self._stack:
             self._stack.remove(sid)
+        _release_role_by_sid(sid)
         self._log_state()
         if not self._stack:
             self._broadcast_stack_update()

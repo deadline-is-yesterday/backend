@@ -16,6 +16,8 @@ from firemap.models import (
 )
 from headquarters.models import ensure_game_db as ensure_headquarters_game_db
 
+from game.logger import log_event
+
 logger = logging.getLogger(__name__)
 bp = Blueprint("game", __name__, url_prefix="/game")
 
@@ -106,6 +108,29 @@ def game_status():
     })
 
 
+@bp.put("/status")
+def update_game_status():
+    """Update the is_running flag."""
+    data = request.get_json(silent=True) or {}
+    is_running = data.get("is_running", False)
+    _set_system("is_running", "1" if is_running else "0")
+
+    # Reset all roles when stopping the game
+    if not is_running:
+        game_id = get_active_game_id()
+        if game_id:
+            con = get_game_db(game_id)
+            try:
+                con.execute("UPDATE roles SET occupied = 0, sid = NULL")
+                con.commit()
+            finally:
+                con.close()
+
+    log_event(get_active_game_id(), "simulation_start" if is_running else "simulation_stop")
+    logger.info("GAME STATUS: is_running=%s", is_running)
+    return jsonify({"ok": True})
+
+
 # ── Plan image ───────────────────────────────────────────────────────────────
 
 @bp.post("/plan")
@@ -189,6 +214,9 @@ def save_map_grid():
     finally:
         con.close()
 
+    log_event(get_active_game_id(), "grid_save", {
+        "resolution": resolution, "grid_rows": grid_rows,
+    })
     logger.info("GRID SAVE: %dx%d", resolution, grid_rows)
     return jsonify({"ok": True})
 
@@ -235,6 +263,12 @@ def save_scenario():
     finally:
         con.close()
 
+    log_event(get_active_game_id(), "scenario_save", {
+        "temperature": data.get("temperature"),
+        "wind_speed": data.get("wind_speed"),
+        "wind_direction": data.get("wind_direction"),
+        "target_address": data.get("target_address"),
+    })
     logger.info("SCENARIO SAVE")
     return jsonify({"ok": True})
 
@@ -429,3 +463,123 @@ def get_vehicle_types():
         }
         for t in types
     ])
+
+
+# ── Auth ─────────────────────────────────────────────────────────────────────
+
+@bp.post("/auth")
+def login():
+    """Verify teacher password."""
+    data = request.get_json(silent=True) or {}
+    password = data.get("password", "")
+    stored = _get_system("teacher_password", "admin")
+    if password == stored:
+        logger.info("AUTH: teacher login OK")
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "error": "wrong password"}), 401
+
+
+# ── Roles ────────────────────────────────────────────────────────────────────
+
+def _ensure_roles_table(con: sqlite3.Connection) -> None:
+    """Create roles table if it doesn't exist (migration for old game DBs)."""
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS roles (
+            role TEXT PRIMARY KEY,
+            occupied INTEGER NOT NULL DEFAULT 0,
+            sid TEXT
+        )
+    """)
+    for role in ('dispatcher', 'rtp', 'squad', 'chief'):
+        con.execute("INSERT OR IGNORE INTO roles (role) VALUES (?)", (role,))
+    con.commit()
+
+
+@bp.get("/roles")
+def get_roles():
+    """Return available roles with occupancy status for the active game."""
+    game_id = get_active_game_id()
+    is_running = _get_system("is_running", "0") == "1"
+    if not game_id or not is_running:
+        return jsonify({"running": False, "roles": []})
+
+    con = get_game_db(game_id)
+    try:
+        _ensure_roles_table(con)
+        rows = con.execute("SELECT role, occupied FROM roles").fetchall()
+        return jsonify({
+            "running": True,
+            "roles": [
+                {"role": r["role"], "occupied": bool(r["occupied"])}
+                for r in rows
+            ],
+        })
+    finally:
+        con.close()
+
+
+@bp.post("/roles/join")
+def join_role():
+    """Join a role. Returns 409 if already taken (race-condition safe)."""
+    data = request.get_json(silent=True) or {}
+    role = data.get("role")
+    sid = data.get("sid")
+
+    if not role or not sid:
+        return jsonify({"error": "role and sid are required"}), 400
+
+    game_id = get_active_game_id()
+    if not game_id:
+        return jsonify({"error": "no active game"}), 400
+
+    con = get_game_db(game_id)
+    try:
+        _ensure_roles_table(con)
+        cur = con.execute(
+            "UPDATE roles SET occupied = 1, sid = ? WHERE role = ? AND occupied = 0",
+            (sid, role),
+        )
+        con.commit()
+        if cur.rowcount == 0:
+            return jsonify({"error": "role already taken"}), 409
+        logger.info("ROLE JOIN: %s sid=%s", role, sid)
+        return jsonify({"ok": True})
+    finally:
+        con.close()
+
+
+@bp.post("/roles/leave")
+def leave_role():
+    """Explicitly leave a role."""
+    data = request.get_json(silent=True) or {}
+    role = data.get("role")
+
+    game_id = get_active_game_id()
+    if not game_id or not role:
+        return jsonify({"ok": True})
+
+    con = get_game_db(game_id)
+    try:
+        con.execute(
+            "UPDATE roles SET occupied = 0, sid = NULL WHERE role = ?",
+            (role,),
+        )
+        con.commit()
+        logger.info("ROLE LEAVE: %s", role)
+    finally:
+        con.close()
+
+    return jsonify({"ok": True})
+
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+
+@bp.get("/logs")
+def get_logs():
+    """Return game event logs for the active game (or a specific game via ?game_id=)."""
+    game_id = request.args.get("game_id") or get_active_game_id()
+    if not game_id or game_id == "0":
+        return jsonify([])
+
+    from game.logger import read_logs
+    return jsonify(read_logs(game_id))
