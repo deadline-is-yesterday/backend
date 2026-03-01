@@ -86,7 +86,7 @@ for y in range(1, 9):
 sim.set_source(6, 4, intensity=1000)
 
 # Машина снаружи
-sim.set_firetruck("truck_1", x=9, y=11, water=2400)
+sim.set_firetruck("truck_1", x=9, y=11, water=240000)
 
 # ── Симуляция ────────────────────────────────────────────────────────────────
 
@@ -100,7 +100,6 @@ for tick in range(200):
 
     draw(sim)
     sim.update()
-    time.sleep(0.15)
 
     # Конец: если все источники потушены
     if not sim.sources:

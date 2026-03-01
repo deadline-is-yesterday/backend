@@ -6,7 +6,7 @@ import logging
 import time
 
 from flask import request
-from flask_socketio import Namespace, emit, join_room, leave_room
+from flask_socketio import Namespace, join_room, leave_room
 
 from extensions import socketio
 from . import state
@@ -129,3 +129,4 @@ class FireSimNamespace(Namespace):
             "hose %s: nozzle=(%s,%s) open=%s in %s",
             truck_id, nozzle_x, nozzle_y, is_open, map_id,
         )
+
