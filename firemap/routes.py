@@ -14,7 +14,7 @@ from .models import (
 bp = Blueprint("firemap", __name__, url_prefix="/firemap")
 
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_FRONTEND_ICONS_DIR = os.path.join(_BACKEND_DIR, "..", "frontend", "ICONS")
+_FRONTEND_ICONS_DIR = os.path.join(_BACKEND_DIR,  "ICONS")
 _PLANS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plans")
 
 
