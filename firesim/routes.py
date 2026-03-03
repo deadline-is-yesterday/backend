@@ -64,8 +64,8 @@ def start_simulation():
         state.game_to_map[gid] = map_id
         # Подгружаем существующие стволы из БД в симуляцию
         sync_hose_ends(gid)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.exception("Failed to sync hose_ends at sim start: %s", exc)
 
     return jsonify({"ok": True, "map_id": map_id})
 

@@ -119,14 +119,16 @@ def update_car():
 
     con = get_game_db(get_active_game_id())
     try:
-        row = con.execute("SELECT id FROM placed_cars WHERE id = ?", (car_id,)).fetchone()
+        # car_id = vehicle_id (строка типа "5")
+        row = con.execute("SELECT id FROM placed_cars WHERE vehicle_id = ?", (car_id,)).fetchone()
         if row is None:
             return jsonify({"error": "placed car not found"}), 404
 
-        con.execute("UPDATE placed_cars SET x = ?, y = ? WHERE id = ?", (x, y, car_id))
+        placed_id = row["id"]
+        con.execute("UPDATE placed_cars SET x = ?, y = ? WHERE id = ?", (x, y, placed_id))
         con.commit()
-        log_event(get_active_game_id(), "hq_car_move", {"placed_id": car_id, "x": x, "y": y})
-        logger.info("HQ CAR MOVE: placed_id=%s x=%.1f y=%.1f", car_id, x, y)
+        log_event(get_active_game_id(), "hq_car_move", {"vehicle_id": car_id, "x": x, "y": y})
+        logger.info("HQ CAR MOVE: vehicle_id=%s x=%.1f y=%.1f", car_id, x, y)
         return jsonify({"ok": True})
     finally:
         con.close()
@@ -143,14 +145,15 @@ def delete_car():
 
     con = get_game_db(get_active_game_id())
     try:
-        row = con.execute("SELECT id FROM placed_cars WHERE id = ?", (car_id,)).fetchone()
+        # car_id = vehicle_id
+        row = con.execute("SELECT id FROM placed_cars WHERE vehicle_id = ?", (car_id,)).fetchone()
         if row is None:
             return jsonify({"error": "placed car not found"}), 404
 
-        con.execute("DELETE FROM placed_cars WHERE id = ?", (car_id,))
+        con.execute("DELETE FROM placed_cars WHERE id = ?", (row["id"],))
         con.commit()
-        log_event(get_active_game_id(), "hq_car_remove", {"placed_id": car_id})
-        logger.info("HQ CAR DELETE: placed_id=%s", car_id)
+        log_event(get_active_game_id(), "hq_car_remove", {"vehicle_id": car_id})
+        logger.info("HQ CAR DELETE: vehicle_id=%s", car_id)
         return jsonify({"ok": True})
     finally:
         con.close()
@@ -167,11 +170,13 @@ def create_hose():
         return jsonify({"error": "id, x, y are required"}), 400
 
     try:
-        hose_id = int(data["id"])
+        hose_id = str(data["id"])  # UUID string from frontend
         x = float(data["x"])
         y = float(data["y"])
     except (ValueError, TypeError):
-        return jsonify({"error": "id must be integer; x and y must be numbers"}), 400
+        return jsonify({"error": "x and y must be numbers"}), 400
+
+    import json as _json
 
     con = get_game_db(get_active_game_id())
     try:
@@ -179,9 +184,16 @@ def create_hose():
         if existing is not None:
             return jsonify({"error": "hose with this id already exists"}), 409
 
+        eq_instance_id = data.get("equipment_instance_id")
+        inner_hose_id = data.get("hose_id")
+        waypoints = _json.dumps(data.get("waypoints") or [])
+        endpoint = _json.dumps(data.get("endpoint")) if data.get("endpoint") else None
+
         con.execute(
-            "INSERT INTO placed_hoses (id, x, y) VALUES (?, ?, ?)",
-            (hose_id, x, y),
+            """INSERT INTO placed_hoses
+               (id, x, y, equipment_instance_id, hose_id, waypoints, endpoint)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (hose_id, x, y, eq_instance_id, inner_hose_id, waypoints, endpoint),
         )
         con.commit()
         log_event(get_active_game_id(), "hq_hose_place", {
@@ -195,7 +207,8 @@ def create_hose():
 
 @bp.put("/hose")
 def update_hose():
-    """Update a hose position."""
+    """Update a hose (waypoints, position)."""
+    import json as _json
     data = request.get_json()
     hose_id = data.get("id")
     x = data.get("x")
@@ -212,10 +225,12 @@ def update_hose():
 
         new_x = x if x is not None else row["x"]
         new_y = y if y is not None else row["y"]
+        waypoints = _json.dumps(data["waypoints"]) if "waypoints" in data else row["waypoints"]
+        endpoint = _json.dumps(data["endpoint"]) if "endpoint" in data else row["endpoint"]
 
         con.execute(
-            "UPDATE placed_hoses SET x = ?, y = ? WHERE id = ?",
-            (new_x, new_y, hose_id),
+            "UPDATE placed_hoses SET x = ?, y = ?, waypoints = ?, endpoint = ? WHERE id = ?",
+            (new_x, new_y, waypoints, endpoint, hose_id),
         )
         con.commit()
         log_event(get_active_game_id(), "hq_hose_move", {

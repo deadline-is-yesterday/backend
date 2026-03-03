@@ -110,8 +110,8 @@ def ensure_game_db(game_id: str) -> str:
     con = sqlite3.connect(path)
     con.execute(
         """CREATE TABLE IF NOT EXISTS placed_hose_ends (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            placed_hose_id INTEGER NOT NULL,
+            id TEXT PRIMARY KEY,
+            placed_hose_id TEXT NOT NULL,
             x REAL NOT NULL, y REAL NOT NULL,
             angle REAL NOT NULL DEFAULT 0,
             active INTEGER NOT NULL DEFAULT 0,
@@ -122,6 +122,17 @@ def ensure_game_db(game_id: str) -> str:
             FOREIGN KEY(vehicle_id) REFERENCES vehicles(id)
         )"""
     )
+    # Миграция: добавить доп. колонки в placed_hoses
+    for col, definition in [
+        ("equipment_instance_id", "TEXT"),
+        ("hose_id", "TEXT"),
+        ("waypoints", "TEXT"),
+        ("endpoint", "TEXT"),
+    ]:
+        try:
+            con.execute(f"ALTER TABLE placed_hoses ADD COLUMN {col} {definition}")
+        except sqlite3.OperationalError:
+            pass  # колонка уже есть
     con.commit()
     con.close()
     return path
@@ -215,8 +226,8 @@ def load_map(game_id: str | None = None) -> HQMap | None:
 def load_layout(game_id: str | None = None) -> dict:
     """Load the layout JSON from the game DB.
 
-    hose_ends always come from the placed_hose_ends table (source of truth),
-    not from the JSON blob stored in layouts.
+    hoses and hose_ends always come from the relational tables
+    (placed_hoses / placed_hose_ends) — they are the source of truth.
     """
     gid = game_id or get_active_game_id()
     con = get_game_db(gid)
@@ -225,8 +236,22 @@ def load_layout(game_id: str | None = None) -> dict:
         if row is None:
             layout: dict[str, Any] = {}
         else:
-            import json
-            layout = json.loads(row["data"])
+            import json as _json
+            layout = _json.loads(row["data"])
+
+        # Source of truth for hoses is the relational table.
+        hose_rows = con.execute("SELECT * FROM placed_hoses ORDER BY id").fetchall()
+        layout["hoses"] = [
+            {
+                "id": r["id"],
+                "equipment_instance_id": r["equipment_instance_id"],
+                "hose_id": r["hose_id"],
+                "waypoints": _json.loads(r["waypoints"]) if r["waypoints"] else [],
+                "endpoint": _json.loads(r["endpoint"]) if r["endpoint"] else None,
+            }
+            for r in hose_rows
+            if r["equipment_instance_id"] is not None
+        ]
 
         # Source of truth for hose_ends is the relational table.
         hose_end_rows = con.execute(
@@ -253,14 +278,14 @@ def load_layout(game_id: str | None = None) -> dict:
 def save_layout(layout: dict, game_id: str | None = None) -> None:
     """Save the layout JSON to the game DB.
 
-    hose_ends are stripped from the JSON because the relational table
-    placed_hose_ends is the single source of truth for them.
+    hoses and hose_ends are stripped from the JSON because the relational
+    tables placed_hoses / placed_hose_ends are the single source of truth.
     """
     gid = game_id or get_active_game_id()
     con = get_game_db(gid)
     try:
         import json
-        clean = {k: v for k, v in layout.items() if k != "hose_ends"}
+        clean = {k: v for k, v in layout.items() if k not in ("hose_ends", "hoses")}
         data = json.dumps(clean, ensure_ascii=False)
         con.execute(
             "INSERT OR REPLACE INTO layouts (id, data) VALUES (1, ?)",

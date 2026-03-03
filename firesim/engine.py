@@ -1,133 +1,69 @@
 """
-FireSim Engine — библиотека симуляции распространения огня и тушения пожаров.
-==============================================================================
+FireSim Engine — библиотека симуляции распространения огня.
+=========================================================================
 
-Содержит всю логику симуляции в одном файле. Не зависит от Flask, SocketIO
-или любого другого фреймворка — может использоваться автономно.
+Работает без Flask/SocketIO. Вызывается через tick-loop каждые ~200 мс.
+Зависимости: только stdlib (math).
 
-Основные сущности
------------------
-- **Сетка (grid)** — двумерный массив height x width.
-  Каждая ячейка хранит числовое значение:
-    * ``> 0``  — температура (чем выше, тем сильнее горит)
-    * ``== 0`` — пустая клетка (нет огня)
-    * ``< 0``  — стена (абсолютное значение = прочность; разрушается от огня)
-
-- **Источник огня (source)** — клетка, которая непрерывно генерирует тепло.
-  Каждый тик интенсивность источника растёт на 1, пока его не потушат.
-  Когда интенсивность падает до 0, источник удаляется.
-
-- **Пожарная машина (FireTruck)** — объект с координатами, запасом воды
-  и рукавом с соплом (nozzle). У каждой машины:
-    * ``id`` — уникальный строковый идентификатор
-    * ``x, y`` — позиция на карте
-    * ``water`` — остаток воды в литрах
-    * ``nozzle_x, nozzle_y`` — координаты конца рукава (сопла)
-    * ``hose_open`` — открыт ли рукав (True = вода льётся)
-
-- **Зона воды (active_water)** — множество клеток, которые в данный момент
-  поливаются водой. Вода блокирует распространение огня через эти клетки.
-
-Физика распространения огня
----------------------------
-Каждый тик для каждой клетки:
-
-1. **Источник**: если источник жив (intensity > 0), его intensity += 1,
-   и клетка получает это значение.
-
-2. **Обычная клетка (>= 0)**: считается среднее тепло от 8 соседей
-   (игнорируя клетки под водой). Новая температура = max(текущая, среднее).
-   Если температура > 0, она дополнительно растёт на 1 за тик.
-
-3. **Стена (< 0)**: если рядом есть огонь, прочность
-   уменьшается на 1 за тик (значение приближается к 0). Когда = 0,
-   объект разрушен и сразу заполняется огнём с интенсивностью, равной
-   среднему арифметическому соседних горящих клеток.
-   Скорость разрушения зависит от начального значения:
-   стена (-200) ~ 40 сек.
-   Гидрант (-9999) — практически неразрушим.
-
-Физика тушения
---------------
-Для каждой машины с ``hose_open=True`` и ``water > 0``:
-
-1. Из позиции сопла (nozzle) определяется направление на ближайший
-   горящий участок.
-
-2. В конусе с углом ``spread_degrees`` (по умолч. 45°) и радиусом
-   ``radius`` (по умолч. 8) все достижимые клетки:
-   - Помечаются как «под водой» (active_water)
-   - Их температура снижается на ``amount`` (по умолч. 100)
-   - Если клетка — источник, его интенсивность снижается на amount * 0.5
-
-3. Израсходованная вода вычитается из ``truck.water``.
-   Когда вода = 0, тушение прекращается.
-
-4. Вода не проходит сквозь стены (is_path_blocked проверяет
-   луч от сопла до клетки).
-
-Сериализация
+Модель сетки
 ------------
-Метод ``to_dict()`` возвращает полное состояние симуляции в виде словаря,
-готового для отправки на фронтенд через JSON:
-    {
-        "ticks":        int,
-        "width":        int,
-        "height":       int,
-        "grid":         [[float, ...], ...],
-        "sources":      [{"x": int, "y": int, "intensity": float}, ...],
-        "active_water": [{"x": int, "y": int}, ...],
-        "trucks":       [{"id": str, "x": int, "y": int, "water": float,
-                          "hose_open": bool,
-                          "hose_end": {"x": int, "y": int} | null}, ...]
-    }
+- Размер: width × height клеток
+- Значения ячеек (float):
+    * ``0``   — пустая клетка
+    * ``> 0`` — огонь (температура, растёт со временем)
+    * ``< 0`` — барьер (абсолютное значение = оставшаяся прочность)
 
-Пример использования (без сервера)
------------------------------------
-    sim = FireSystem(20, 12)
-    sim.set_wall(5, 0, -100)
-    sim.set_source(3, 3, intensity=1000)
-    sim.set_firetruck("truck_1", x=10, y=10, water=2400)
-    sim.set_hose_nozzle("truck_1", nozzle_x=4, nozzle_y=4, is_open=True)
-
-    for _ in range(50):
-        sim.update()
-
-    state = sim.to_dict()
-    print(state["trucks"][0]["water"])   # остаток воды
-    print(state["sources"])              # оставшиеся источники
+Порядок обновления (update)
+---------------------------
+1. Пополнение баков от гидрантов
+2. Очистка active_water
+3. Тушение: для каждого truck → для каждого nozzle → конус воды (локально)
+4. Обновление сетки:
+   a. Барьеры: разрушение от огня
+   b. Источники: рост intensity (если не под водой)
+   c. Горящие клетки: рост температуры (если под водой → 0)
+   d. Пустые клетки: распространение огня (каждые FIRE_SPREAD_INTERVAL тиков)
+5. Очистка потухших источников
 """
 
 from __future__ import annotations
 
-import copy
 import math
 from typing import Any
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  НАСТРОЙКИ СИМУЛЯЦИИ — меняйте значения здесь
+#  КОНСТАНТЫ (настраиваемые)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Скорость распространения огня:
-# Огонь распространяется на новые клетки каждые N тиков.
-# При 5 тиков/сек: 25 = ~1 клетка за 5 секунд.
-FIRE_SPREAD_INTERVAL = 25
+FIRE_SPREAD_INTERVAL: int = 50       # тиков между волнами распространения
+FIRE_GROWTH_PER_TICK: float = 1.0    # рост температуры горящей клетки за тик
+FIRE_SOURCE_GROWTH: float = 1.0      # рост интенсивности источника за тик
 
-# Прочность объектов (сколько тиков с огнём рядом до разрушения):
-# При 5 тиков/сек: 200 тиков = 40 сек.
-WALL_DURABILITY_WALL   = -200   # Стена: разрушается за ~40 секунд
-WALL_DURABILITY_DOOR   = -300   # Дверь: прочнее стены
-WALL_DURABILITY_WINDOW = -250   # Окно: прочнее стены
-WALL_DURABILITY_HYDRANT = -9999 # Гидрант: практически неразрушим
+WATER_RADIUS: int = 25               # радиус действия ствола (клетки)
+WATER_AMOUNT: float = 100.0          # сила тушения за тик (снижение температуры клетки)
+WATER_PER_NOZZLE_TICK: float = 50.0  # фиксированный расход воды на ствол за тик (литры)
 
-# Типы преград и их прочность (отрицательные значения).
-BARRIER_DURABILITY: dict[str, int] = {
-    "wall": WALL_DURABILITY_WALL,
-    "door": WALL_DURABILITY_DOOR,
-    "window": WALL_DURABILITY_WINDOW,
-    "hydrant": WALL_DURABILITY_HYDRANT,
+HYDRANT_REFILL_RATE: float = 200.0   # литров/тик при подключённом гидранте
+
+BARRIER_HP: dict[str, int] = {
+    "wall":    1000,
+    "door":    300,
+    "window":  500,
+    "hydrant": 9999,
 }
+
+# Ортогональные смещения (4 стороны)
+_ORTHO = ((1, 0), (-1, 0), (0, 1), (0, -1))
+
+# Все 8 соседей
+_NEIGHBORS_8 = (
+    (-1, -1), (0, -1), (1, -1),
+    (-1,  0),          (1,  0),
+    (-1,  1), (0,  1), (1,  1),
+)
+
+_TWO_PI: float = 2.0 * math.pi
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -136,14 +72,14 @@ BARRIER_DURABILITY: dict[str, int] = {
 
 
 class Nozzle:
-    """Ствол (конец рукава) — точка, из которой льётся вода.
+    """Ствол — точка, из которой льётся вода конусом.
 
     Attributes:
-        id:         Уникальный идентификатор ствола (str).
-        x, y:       Позиция на сетке (в клетках).
-        angle:      Направление струи в радианах (0 = вправо, π/2 = вниз).
-        spread_deg: Угол конуса распыления (градусы, макс. 90).
-        is_open:    True — вода подаётся, False — перекрыт.
+        id:         Уникальный идентификатор (str, UUID).
+        x, y:       Позиция на сетке (float, в клетках).
+        angle:      Направление струи (радианы, 0 = вправо).
+        spread_deg: Угол конуса (градусы, 10..140).
+        is_open:    True — вода подаётся.
     """
 
     __slots__ = ("id", "x", "y", "angle", "spread_deg", "is_open")
@@ -158,11 +94,11 @@ class Nozzle:
         is_open: bool = False,
     ) -> None:
         self.id: str = nozzle_id
-        self.x: float = x
-        self.y: float = y
-        self.angle: float = angle
-        self.spread_deg: float = min(spread_deg, 90.0)
-        self.is_open: bool = is_open
+        self.x: float = float(x)
+        self.y: float = float(y)
+        self.angle: float = float(angle)
+        self.spread_deg: float = max(10.0, min(float(spread_deg), 140.0))
+        self.is_open: bool = bool(is_open)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -181,62 +117,38 @@ class Nozzle:
 
 
 class FireTruck:
-    """Пожарная машина с запасом воды и стволами.
-
-    У машины есть бак воды (water / max_water), к ней подключаются
-    стволы (nozzles). Все стволы одной машины делят один бак.
-
-    Для обратной совместимости поддерживается также одиночный legacy-ствол
-    (nozzle_x, nozzle_y, hose_open).
+    """Пожарная машина с баком воды и стволами.
 
     Attributes:
-        id:               Уникальный идентификатор машины (str).
-        x, y:             Позиция машины на сетке.
-        water:            Остаток воды в литрах (по умолч. 2400).
-        max_water:        Ёмкость бака (литры).
-        nozzles:          Список стволов (Nozzle), подключённых к этой машине.
-        hydrant_connected: True — машина подключена к гидранту (бак пополняется).
-        nozzle_x:         (legacy) X-координата одиночного сопла.
-        nozzle_y:         (legacy) Y-координата одиночного сопла.
-        hose_open:        (legacy) Открыт ли одиночный рукав.
+        id:                Уникальный идентификатор (str, UUID — equipment_instance_id).
+        x, y:              Позиция машины.
+        water:             Текущий запас воды (литры).
+        max_water:         Ёмкость бака.
+        hydrant_connected: Подключена ли к гидранту.
+        nozzles:           Список стволов (Nozzle).
     """
 
-    __slots__ = (
-        "id", "x", "y", "water", "max_water",
-        "nozzle_x", "nozzle_y", "hose_open", "hydrant_connected",
-        "nozzles",
-    )
+    __slots__ = ("id", "x", "y", "water", "max_water", "hydrant_connected", "nozzles")
 
-    def __init__(self, truck_id: str, x: int, y: int, water: float = 2400) -> None:
+    def __init__(self, truck_id: str, x: float, y: float, water: float = 2400.0) -> None:
         self.id: str = truck_id
-        self.x: int = x
-        self.y: int = y
-        self.water: float = water
-        self.max_water: float = water  # ёмкость бака = начальный запас
-        self.nozzle_x: int | None = None
-        self.nozzle_y: int | None = None
-        self.hose_open: bool = False
+        self.x: float = float(x)
+        self.y: float = float(y)
+        self.water: float = float(water)
+        self.max_water: float = float(water)
         self.hydrant_connected: bool = False
         self.nozzles: list[Nozzle] = []
 
     def to_dict(self) -> dict[str, Any]:
-        """Сериализация машины в словарь для JSON."""
-        d: dict[str, Any] = {
+        return {
             "id": self.id,
             "x": self.x,
             "y": self.y,
             "water": round(self.water, 2),
             "max_water": round(self.max_water, 2),
-            "hose_open": self.hose_open,
             "hydrant_connected": self.hydrant_connected,
+            "nozzles": [n.to_dict() for n in self.nozzles],
         }
-        if self.nozzle_x is not None and self.nozzle_y is not None:
-            d["hose_end"] = {"x": self.nozzle_x, "y": self.nozzle_y}
-        else:
-            d["hose_end"] = None
-        if self.nozzles:
-            d["nozzles"] = [n.to_dict() for n in self.nozzles]
-        return d
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -245,57 +157,33 @@ class FireTruck:
 
 
 class FireSystem:
-    """Главный класс симуляции: сетка, огонь, стены, машины, вода.
+    """Главный класс симуляции: сетка, огонь, барьеры, машины, вода.
 
     Args:
-        width:   Ширина сетки (кол-во столбцов).
-        height:  Высота сетки (кол-во строк).
-        speed_n: Делитель тиков. Реальный пересчёт физики происходит
-                 каждый ``speed_n``-й вызов update(). По умолч. 1 (каждый тик).
+        width:   Ширина сетки (столбцы).
+        height:  Высота сетки (строки).
+        speed_n: Делитель тиков — реальный пересчёт каждые speed_n вызовов update().
     """
 
     def __init__(self, width: int, height: int, speed_n: int = 1) -> None:
         self.width: int = width
         self.height: int = height
-        self.speed_n: int = speed_n
+        self.speed_n: int = max(1, speed_n)
         self.ticks: int = 0
 
-        # Сетка: 0 = пусто, >0 = огонь, <0 = стена
-        self.grid: list[list[float]] = [
-            [0.0 for _ in range(width)] for _ in range(height)
-        ]
+        # Сетка: 0 = пусто, >0 = огонь, <0 = барьер
+        self.grid: list[list[float]] = [[0.0] * width for _ in range(height)]
 
-        # Источники огня: (x, y) -> текущая интенсивность
+        # Источники огня: (x, y) → текущая интенсивность
         self.sources: dict[tuple[int, int], float] = {}
 
         # Клетки, которые сейчас поливаются водой
-        self.active_water: dict[tuple[int, int], bool] = {}
+        self.active_water: set[tuple[int, int]] = set()
 
-        # Пожарные машины: truck_id -> FireTruck
+        # Пожарные машины: truck_id → FireTruck
         self.firetrucks: dict[str, FireTruck] = {}
 
-        # Клетки, где преграда была разрушена и теперь горит.
-        # Такой огонь визуально присутствует, но не распространяется дальше
-        # напрямую через бывшую преграду.
-        self.destroyed_barrier_cells: set[tuple[int, int]] = set()
-
     # ── Настройка карты ──────────────────────────────────────────────────────
-
-    def set_wall(self, x: int, y: int, wall_type: int = WALL_DURABILITY_WALL) -> None:
-        """Поставить стену в клетку (x, y).
-
-        Args:
-            x, y:      Координаты клетки.
-            wall_type: Отрицательное число = прочность стены.
-                       Например, -100 = очень прочная, -10 = слабая.
-        """
-        # Если на этой клетке был источник — убираем его
-        self.sources.pop((x, y), None)
-        self.destroyed_barrier_cells.discard((x, y))
-        # Гарантируем, что стена всегда имеет отрицательное значение
-        self.grid[y][x] = (
-            -abs(wall_type) if wall_type != 0 else WALL_DURABILITY_WALL
-        )
 
     def set_barrier(
         self,
@@ -304,108 +192,60 @@ class FireSystem:
         kind: str = "wall",
         hp: int | None = None,
     ) -> None:
-        """Поставить преграду (wall/door/window/hydrant) в клетку (x, y).
-
-        Args:
-            x, y: Координаты клетки.
-            kind: Тип преграды. Неизвестный тип трактуется как "wall".
-            hp:   Явная прочность. Если передана — имеет приоритет над kind.
-        """
+        """Поставить барьер (wall / door / window / hydrant)."""
         if hp is not None:
-            resolved_hp = hp
+            resolved = abs(hp)
         else:
-            resolved_hp = BARRIER_DURABILITY.get(str(kind).lower(), WALL_DURABILITY_WALL)
-        self.set_wall(x, y, resolved_hp)
+            resolved = BARRIER_HP.get(str(kind).lower(), BARRIER_HP["wall"])
+        self.sources.pop((x, y), None)
+        self.grid[y][x] = -float(resolved)
+
+    # Обратная совместимость
+    def set_wall(self, x: int, y: int, wall_type: int = -200) -> None:
+        """legacy-обёртка для set_barrier."""
+        self.set_barrier(x, y, hp=abs(wall_type))
 
     def set_door(self, x: int, y: int, hp: int | None = None) -> None:
-        """Поставить дверь как преграду с повышенной прочностью."""
         self.set_barrier(x, y, kind="door", hp=hp)
 
     def set_window(self, x: int, y: int, hp: int | None = None) -> None:
-        """Поставить окно как преграду с повышенной прочностью."""
         self.set_barrier(x, y, kind="window", hp=hp)
 
-    def set_source(self, x: int, y: int, intensity: int = 1000) -> None:
-        """Установить источник огня.
-
-        Args:
-            x, y:      Координаты клетки.
-            intensity: Начальная интенсивность (по умолч. 1000).
-        """
-        # Нельзя ставить очаг на стену
+    def set_source(self, x: int, y: int, intensity: float = 1000.0) -> None:
+        """Установить источник огня."""
         if self.grid[y][x] < 0:
             return
-        self.sources[(x, y)] = intensity
-        self.grid[y][x] = intensity
+        self.sources[(x, y)] = float(intensity)
+        self.grid[y][x] = float(intensity)
 
     # ── Пожарные машины ──────────────────────────────────────────────────────
 
     def set_firetruck(
-        self, truck_id: str, x: int, y: int, water: float = 2400
+        self, truck_id: str, x: float, y: float, water: float = 2400.0,
     ) -> None:
-        """Добавить или обновить позицию пожарной машины.
-
-        Если машина с таким truck_id уже существует — обновляет координаты
-        и запас воды. Иначе — создаёт новую.
-
-        Args:
-            truck_id: Уникальный id машины.
-            x, y:     Позиция на сетке.
-            water:    Запас воды в литрах (по умолч. 2400).
-        """
+        """Добавить или обновить пожарную машину."""
         if truck_id in self.firetrucks:
-            truck = self.firetrucks[truck_id]
-            truck.x = x
-            truck.y = y
-            truck.water = water
+            t = self.firetrucks[truck_id]
+            t.x = float(x)
+            t.y = float(y)
+            t.water = float(water)
         else:
             self.firetrucks[truck_id] = FireTruck(truck_id, x, y, water)
 
-    def set_hose_nozzle(
-        self, truck_id: str, nozzle_x: int, nozzle_y: int, is_open: bool
-    ) -> None:
-        """Установить позицию конца рукава (сопла) и его состояние.
-
-        Args:
-            truck_id:           ID машины.
-            nozzle_x, nozzle_y: Координаты конца рукава.
-            is_open:            True — вода подаётся, False — рукав перекрыт.
-        """
-        truck = self.firetrucks.get(truck_id)
-        if truck is None:
-            return
-        truck.nozzle_x = nozzle_x
-        truck.nozzle_y = nozzle_y
-        truck.hose_open = is_open
-
     def set_hydrant_connected(self, truck_id: str, connected: bool) -> None:
-        """Установить подключение машины к гидранту.
-
-        Когда подключён гидрант, бак пополняется (даже во время тушения).
-        """
-        truck = self.firetrucks.get(truck_id)
-        if truck is None:
-            return
-        truck.hydrant_connected = connected
-
-    # ── Управление стволами (Nozzle) ────────────────────────────────────────
+        """Подключение / отключение от гидранта."""
+        t = self.firetrucks.get(truck_id)
+        if t is not None:
+            t.hydrant_connected = bool(connected)
 
     def sync_nozzles(
-        self, truck_id: str, nozzles_data: list[dict[str, Any]]
+        self, truck_id: str, nozzles_data: list[dict[str, Any]],
     ) -> None:
-        """Полная синхронизация стволов машины.
-
-        Заменяет текущий список nozzles у машины на новый.
-
-        Args:
-            truck_id:     ID машины.
-            nozzles_data: Список словарей с ключами:
-                          id, x, y, angle, spread_deg, is_open.
-        """
-        truck = self.firetrucks.get(truck_id)
-        if truck is None:
+        """Полная синхронизация стволов машины."""
+        t = self.firetrucks.get(truck_id)
+        if t is None:
             return
-        truck.nozzles = [
+        t.nozzles = [
             Nozzle(
                 nozzle_id=str(nd["id"]),
                 x=nd["x"],
@@ -417,388 +257,243 @@ class FireSystem:
             for nd in nozzles_data
         ]
 
-    # ── Проверка проходимости луча ───────────────────────────────────────────
+    # Legacy-метод для events.py (on_hose_update)
+    def set_hose_nozzle(
+        self, truck_id: str, nozzle_x: int, nozzle_y: int, is_open: bool,
+    ) -> None:
+        """Создаёт одиночный ствол (обратная совместимость)."""
+        t = self.firetrucks.get(truck_id)
+        if t is None:
+            return
+        if is_open and nozzle_x is not None and nozzle_y is not None:
+            t.nozzles = [Nozzle(
+                nozzle_id=f"{truck_id}_legacy",
+                x=float(nozzle_x),
+                y=float(nozzle_y),
+                angle=0.0,
+                spread_deg=45.0,
+                is_open=True,
+            )]
+        else:
+            t.nozzles = []
 
-    def is_path_blocked(
-        self, start_x: int, start_y: int, end_x: int, end_y: int
-    ) -> bool:
-        """Проверяет, пересекает ли прямая линия от (start) до (end) стену.
+    # ── Проверка видимости (луч не пересекает барьер) ────────────────────────
 
-        Используется для определения, дойдёт ли вода от сопла до клетки.
-        Проходит по клеткам на луче; если хоть одна — стена (< 0),
-        возвращает True (путь заблокирован).
-
-        Returns:
-            True если путь заблокирован стеной, False если свободен.
-        """
-        steps = max(abs(end_x - start_x), abs(end_y - start_y))
+    @staticmethod
+    def _is_blocked(grid: list[list[float]], W: int, H: int,
+                    sx: int, sy: int, ex: int, ey: int) -> bool:
+        """True если линия от (sx,sy) до (ex,ey) пересекает барьер."""
+        dx = ex - sx
+        dy = ey - sy
+        steps = max(abs(dx), abs(dy))
         if steps == 0:
             return False
+        inv = 1.0 / steps
         for i in range(1, steps):
-            tx = int(start_x + (end_x - start_x) * i / steps)
-            ty = int(start_y + (end_y - start_y) * i / steps)
-            if 0 <= tx < self.width and 0 <= ty < self.height:
-                if self.grid[ty][tx] < 0:
-                    return True
+            tx = int(sx + dx * i * inv)
+            ty = int(sy + dy * i * inv)
+            if 0 <= tx < W and 0 <= ty < H and grid[ty][tx] < 0:
+                return True
         return False
 
-    # ── Тушение водой ────────────────────────────────────────────────────────
+    # ── Физика воды ──────────────────────────────────────────────────────────
 
-    def _apply_water_from_truck(
-        self,
-        truck: FireTruck,
-        radius: int = 8,
-        amount: float = 100,
-        spread_degrees: int = 45,
-    ) -> None:
-        """Применить воду от одной машины.
+    def _apply_nozzle(self, nozzle: Nozzle) -> None:
+        """Конус воды от одного ствола. Bounding-box оптимизация.
 
-        Алгоритм:
-        1. Определяет направление: от сопла к ближайшему горящему участку.
-        2. В конусе (spread_degrees, по умолч. 45°) с радиусом (radius, по умолч. 8)
-           находит все достижимые клетки (не за стеной).
-        3. Для каждой найденной горящей клетки:
-           - Снижает температуру на amount
-           - Если это источник — снижает его intensity на amount * 0.5
-           - Отмечает клетку как «под водой» (active_water)
-        4. Вычитает израсходованную воду из truck.water.
-
-        Args:
-            truck:          Пожарная машина.
-            radius:         Радиус действия воды (в клетках).
-            amount:         Сила тушения за тик.
-            spread_degrees: Угол конуса распыления (макс. 45°).
+        Расход воды из бака списывается в update() до вызова — здесь только
+        отмечаем клетки под водой и снижаем огонь.
         """
-        # Без сопла или без воды — ничего не делаем
-        if truck.nozzle_x is None or truck.nozzle_y is None:
-            return
-        if truck.water <= 0:
-            return
+        nx, ny = nozzle.x, nozzle.y
+        angle = nozzle.angle
+        half_spread = math.radians(nozzle.spread_deg / 2.0)
+        R = WATER_RADIUS
+        amt = WATER_AMOUNT
 
-        nozzle_x = truck.nozzle_x
-        nozzle_y = truck.nozzle_y
+        # Целочисленный центр для ray-check
+        inx = int(round(nx))
+        iny = int(round(ny))
 
-        # Шаг 1: ищем ближайший огонь для определения направления струи
-        nearest_fire: tuple[int, int] | None = None
-        nearest_dist = float("inf")
-        for y in range(self.height):
-            for x in range(self.width):
-                if self.grid[y][x] > 0:
-                    d = math.hypot(x - nozzle_x, y - nozzle_y)
-                    if d < nearest_dist:
-                        nearest_dist = d
-                        nearest_fire = (x, y)
+        W, H = self.width, self.height
+        grid = self.grid
+        aw = self.active_water
+        sources = self.sources
 
-        if nearest_fire is None:
-            return  # нечего тушить
+        # Bounding box вместо полного обхода сетки
+        x0 = max(0, inx - R)
+        x1 = min(W - 1, inx + R)
+        y0 = max(0, iny - R)
+        y1 = min(H - 1, iny + R)
 
-        # Шаг 2: угол от сопла к цели
-        target_x, target_y = nearest_fire
-        spread_degrees = min(spread_degrees, 45)
-        main_angle = math.atan2(target_y - nozzle_y, target_x - nozzle_x)
-        half_spread_rad = math.radians(spread_degrees / 2)
+        R_sq = float(R * R)
+        is_blocked = self._is_blocked
 
-        # Шаг 3: обход клеток в зоне действия
-        water_used = 0.0
+        for cy in range(y0, y1 + 1):
+            row = grid[cy]
+            for cx in range(x0, x1 + 1):
+                fdx = cx - nx
+                fdy = cy - ny
 
-        for y in range(self.height):
-            for x in range(self.width):
-                # Вода закончилась — прекращаем
-                if truck.water - water_used <= 0:
-                    break
-
-                dx = x - nozzle_x
-                dy = y - nozzle_y
-                dist = math.hypot(dx, dy)
-
-                # Проверка: клетка в радиусе?
-                if dist > radius:
+                # Проверка радиуса (квадрат расстояния)
+                if fdx * fdx + fdy * fdy > R_sq:
                     continue
 
-                # Проверка: клетка в конусе?
-                cell_angle = math.atan2(dy, dx)
-                diff = (cell_angle - main_angle + math.pi) % (2 * math.pi) - math.pi
-                if abs(diff) > half_spread_rad:
+                # Проверка конуса (угол)
+                cell_angle = math.atan2(fdy, fdx)
+                diff = (cell_angle - angle + math.pi) % _TWO_PI - math.pi
+                if abs(diff) > half_spread:
                     continue
 
-                # Проверка: клетка не стена и не за стеной?
-                if self.grid[y][x] < 0:
+                # Вода не проходит через барьер
+                cell = row[cx]
+                if cell < 0:
                     continue
-                if self.is_path_blocked(nozzle_x, nozzle_y, x, y):
+                if is_blocked(grid, W, H, inx, iny, cx, cy):
                     continue
 
-                # Клетка достижима — помечаем как «под водой»
-                self.active_water[(x, y)] = True
+                # Клетка под водой
+                aw.add((cx, cy))
 
                 # Тушим огонь
-                if self.grid[y][x] > 0:
-                    reduction = min(amount, self.grid[y][x])
-                    self.grid[y][x] = round(max(0.0, self.grid[y][x] - amount), 2)
-                    water_used += reduction
+                if cell > 0:
+                    row[cx] = max(0.0, cell - amt)
 
-                # Тушим источник (медленнее)
-                if (x, y) in self.sources:
-                    self.sources[(x, y)] = max(
-                        0.0, self.sources[(x, y)] - amount * 0.5
-                    )
-
-        # Шаг 4: списываем воду
-        truck.water = max(0.0, truck.water - water_used)
-
-    def _apply_water_from_nozzle(
-        self,
-        truck: FireTruck,
-        nozzle: Nozzle,
-        radius: int = 8,
-        amount: float = 100,
-    ) -> None:
-        """Применить воду от одного ствола (Nozzle).
-
-        В отличие от _apply_water_from_truck, направление берётся из
-        nozzle.angle (а не вычисляется по ближайшему огню).
-
-        Args:
-            truck:  Машина, из бака которой расходуется вода.
-            nozzle: Ствол с координатами и направлением.
-            radius: Радиус действия воды (в клетках).
-            amount: Сила тушения за тик.
-        """
-        if truck.water <= 0:
-            return
-
-        amount = 1000000000000000
-
-        nx = nozzle.x
-        ny = nozzle.y
-        main_angle = nozzle.angle  # радианы
-        half_spread_rad = math.radians(nozzle.spread_deg / 2)
-
-        water_used = 0.0
-
-        for y in range(self.height):
-            for x in range(self.width):
-                if truck.water - water_used <= 0:
-                    break
-
-                dx = x - nx
-                dy = y - ny
-                dist = math.hypot(dx, dy)
-
-                if dist > radius or dist < 0.01:
-                    continue
-
-                cell_angle = math.atan2(dy, dx)
-                diff = (cell_angle - main_angle + math.pi) % (2 * math.pi) - math.pi
-                if abs(diff) > half_spread_rad:
-                    continue
-
-                if self.grid[y][x] < 0:
-                    continue
-                if self.is_path_blocked(int(round(nx)), int(round(ny)), x, y):
-                    continue
-
-                self.active_water[(x, y)] = True
-
-                if self.grid[y][x] > 0:
-                    reduction = min(amount, self.grid[y][x])
-                    self.grid[y][x] = round(max(0.0, self.grid[y][x] - amount), 2)
-                    water_used += reduction
-
-                if (x, y) in self.sources:
-                    self.sources[(x, y)] = max(
-                        0.0, self.sources[(x, y)] - amount * 0.5
-                    )
-
-        truck.water = max(0.0, truck.water - water_used)
+                # Тушим источник
+                if (cx, cy) in sources:
+                    sources[(cx, cy)] = max(0.0, sources[(cx, cy)] - amt)
 
     # ── Основной тик ─────────────────────────────────────────────────────────
 
     def update(self) -> bool:
-        """Выполнить один тик симуляции.
-
-        Порядок действий:
-        1. Тушение: для каждой машины с hose_open=True применяется вода.
-        2. Разрушение стен от огня (кроме гидрантов).
-        3. Распространение огня на новые клетки (каждые FIRE_SPREAD_INTERVAL тиков).
-        4. Очистка: потухшие источники удаляются.
+        """Один тик симуляции.
 
         Returns:
-            True если физика была пересчитана, False если тик пропущен
-            (из-за speed_n).
+            True если физика пересчитана, False если тик пропущен (speed_n).
         """
         self.ticks += 1
-
-        # Пропуск тика (speed_n > 1 замедляет симуляцию)
         if self.ticks % self.speed_n != 0:
             return False
 
-        # ── Фаза 0: пополнение бака от гидранта ───────────────────────
-        _HYDRANT_REFILL_RATE = 200  # литров за тик
+        W, H = self.width, self.height
+        grid = self.grid
+        sources = self.sources
+
+        # ── 1. Пополнение баков от гидрантов ─────────────────────────
         for truck in self.firetrucks.values():
             if truck.hydrant_connected:
-                truck.water = min(truck.max_water, truck.water + _HYDRANT_REFILL_RATE)
+                truck.water = min(truck.max_water, truck.water + HYDRANT_REFILL_RATE)
 
-        # ── Фаза 1: тушение ─────────────────────────────────────────────
+        # ── 2. Очистка active_water ──────────────────────────────────
         self.active_water.clear()
-        for truck in self.firetrucks.values():
-            # Мультисопловой режим (nozzles)
-            if truck.nozzles:
-                for nozzle in truck.nozzles:
-                    if nozzle.is_open and truck.water > 0:
-                        self._apply_water_from_nozzle(truck, nozzle)
-            # Legacy: одиночный ствол
-            elif truck.hose_open:
-                if truck.water <= 0:
-                    truck.hose_open = False
-                    continue
-                self._apply_water_from_truck(truck)
 
-        # ── Фаза 2: распространение огня ────────────────────────────────
-        new_grid = copy.deepcopy(self.grid)
+        # ── 3. Тушение конусами ──────────────────────────────────────
+        # Фиксированный расход воды на каждый открытый ствол
+        for truck in self.firetrucks.values():
+            for nozzle in truck.nozzles:
+                if nozzle.is_open and truck.water > 0:
+                    truck.water = max(0.0, truck.water - WATER_PER_NOZZLE_TICK)
+                    self._apply_nozzle(nozzle)
+
+        aw = self.active_water
+
+        # ── 4. Обновление сетки ──────────────────────────────────────
+        # Shallow copy строк (float immutable → безопасно)
+        new_grid = [row[:] for row in grid]
         can_spread = (self.ticks % FIRE_SPREAD_INTERVAL == 0)
 
-        for y in range(self.height):
-            for x in range(self.width):
-                current = self.grid[y][x]
+        for y in range(H):
+            old_row = grid[y]
+            new_row = new_grid[y]
+            for x in range(W):
+                val = old_row[x]
 
-                # --- Стена: разрушается от огня ---
-                if current < 0:
-                    # Гидрант (очень большая прочность) — практически неразрушим
-                    if current <= WALL_DURABILITY_HYDRANT:
-                        new_grid[y][x] = current
+                # 4a. Барьеры: разрушение от огня
+                if val < 0:
+                    # Гидрант — неразрушим
+                    if val <= -9999:
                         continue
 
-                    # Проверяем, есть ли огонь рядом (только по сторонам,
-                    # чтобы огонь не "проскакивал" через углы препятствий)
-                    has_fire_neighbor = False
-                    for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                        nnx, nny = x + ddx, y + ddy
-                        if 0 <= nnx < self.width and 0 <= nny < self.height:
-                            if self.grid[nny][nnx] > 0:
-                                has_fire_neighbor = True
-                                break
-                        if has_fire_neighbor:
+                    # Горящие ортогональные соседи
+                    fire_near = False
+                    for dx, dy in _ORTHO:
+                        ax, ay = x + dx, y + dy
+                        if 0 <= ax < W and 0 <= ay < H and grid[ay][ax] > 0:
+                            fire_near = True
                             break
 
-                    if has_fire_neighbor:
-                        # Прочность -= 1 каждый тик (приближается к 0)
-                        new_val = current + 1
-                        if new_val >= 0:
-                            # Разрушено: клетка становится огнём со средним
-                            # индексом соседних горящих клеток.
-                            burning_neighbors: list[float] = []
-                            for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                                nnx, nny = x + ddx, y + ddy
-                                if 0 <= nnx < self.width and 0 <= nny < self.height:
-                                    neighbor_val = self.grid[nny][nnx]
-                                    if neighbor_val > 0:
-                                        burning_neighbors.append(neighbor_val)
-
-                            if burning_neighbors:
-                                new_grid[y][x] = round(
-                                    sum(burning_neighbors) / len(burning_neighbors), 2
-                                )
-                                self.destroyed_barrier_cells.add((x, y))
-                            else:
-                                new_grid[y][x] = 0
-                                self.destroyed_barrier_cells.discard((x, y))
+                    if fire_near:
+                        new_hp = val + 1  # приближается к 0
+                        if new_hp >= 0:
+                            # Разрушен → огонь = среднее горящих соседей
+                            total = 0.0
+                            cnt = 0
+                            for dx, dy in _ORTHO:
+                                ax, ay = x + dx, y + dy
+                                if 0 <= ax < W and 0 <= ay < H and grid[ay][ax] > 0:
+                                    total += grid[ay][ax]
+                                    cnt += 1
+                            new_row[x] = total / cnt if cnt else 0.0
                         else:
-                            new_grid[y][x] = new_val
-                            self.destroyed_barrier_cells.discard((x, y))
+                            new_row[x] = new_hp
+
+                # 4b. Источники: рост intensity
+                elif (x, y) in sources:
+                    if (x, y) in aw:
+                        new_row[x] = 0.0
                     else:
-                        new_grid[y][x] = current
+                        sources[(x, y)] += FIRE_SOURCE_GROWTH
+                        new_row[x] = sources[(x, y)]
 
-                # --- Источник огня ---
-                elif (x, y) in self.sources:
-                    if (x, y) in self.active_water:
-                        # Источник под водой — не разгорается
-                        new_grid[y][x] = 0
-                    elif self.sources[(x, y)] > 0:
-                        # Источник разгорается
-                        self.sources[(x, y)] += 1
-                        new_grid[y][x] = self.sources[(x, y)]
+                # 4c. Горящие клетки: рост температуры
+                elif val > 0:
+                    if (x, y) in aw:
+                        new_row[x] = 0.0
                     else:
-                        # Источник потушен, температура остаётся как есть
-                        new_grid[y][x] = current
+                        new_row[x] = val + FIRE_GROWTH_PER_TICK
 
-                # --- Обычная клетка (пол, воздух) ---
-                elif current >= 0:
-                    # Клетка под водой — огонь не горит и не распространяется
-                    if (x, y) in self.active_water:
-                        new_grid[y][x] = 0
-                    elif current > 0:
-                        # Уже горит — разгорается (+1 за тик)
-                        new_grid[y][x] = current + 1
-                    elif can_spread:
-                        # Ещё не горит — проверяем распространение
-                        # (только каждые FIRE_SPREAD_INTERVAL тиков)
-                        surrounding_sum = 0.0
-                        burning_count = 0
-                        for dx in [-1, 0, 1]:
-                            for dy in [-1, 0, 1]:
-                                if dx == 0 and dy == 0:
-                                    continue
-                                nx, ny = x + dx, y + dy
-                                if 0 <= nx < self.width and 0 <= ny < self.height:
-                                    if (nx, ny) in self.active_water:
-                                        continue
-                                    val = self.grid[ny][nx]
-                                    if val > 0:
-                                        # Огонь в клетке разрушенной преграды
-                                        # не проводит распространение "насквозь".
-                                        if (nx, ny) in self.destroyed_barrier_cells:
-                                            continue
-                                        # Блокируем диагональный "перескок" через угол стены.
-                                        if dx != 0 and dy != 0:
-                                            if self.grid[y][nx] < 0 or self.grid[ny][x] < 0:
-                                                continue
-                                        surrounding_sum += val
-                                        burning_count += 1
+                # 4d. Пустые клетки: распространение огня
+                elif can_spread:  # val == 0
+                    total = 0.0
+                    cnt = 0
+                    for dx, dy in _NEIGHBORS_8:
+                        ax, ay = x + dx, y + dy
+                        if not (0 <= ax < W and 0 <= ay < H):
+                            continue
+                        nv = grid[ay][ax]
+                        if nv <= 0:
+                            continue
+                        # Клетка под водой — огонь через неё не распространяется
+                        if (ax, ay) in aw:
+                            continue
+                        # Диагональное перекрытие через угол барьера
+                        if dx != 0 and dy != 0:
+                            if grid[y][ax] < 0 or grid[ay][x] < 0:
+                                continue
+                        total += nv
+                        cnt += 1
+                    if cnt > 0:
+                        new_row[x] = total / cnt
 
-                        calculated_mean = (
-                            round(surrounding_sum / burning_count, 2)
-                            if burning_count > 0
-                            else 0.0
-                        )
-                        if calculated_mean > 0:
-                            new_grid[y][x] = round(calculated_mean, 2)
-                    # else: current == 0 и не тик распространения → остаётся 0
-
-        # ── Фаза 3: применяем новую сетку ───────────────────────────────
         self.grid = new_grid
 
-        # Оставляем только те разрушенные преграды, где ещё есть огонь.
-        self.destroyed_barrier_cells = {
-            pos for pos in self.destroyed_barrier_cells if self.grid[pos[1]][pos[0]] > 0
-        }
-
-        # Удаляем потухшие источники (intensity <= 0)
-        self.sources = {pos: val for pos, val in self.sources.items() if val > 0}
+        # ── 5. Очистка потухших источников ───────────────────────────
+        self.sources = {p: v for p, v in sources.items() if v > 0}
 
         return True
 
     # ── Сериализация ─────────────────────────────────────────────────────────
 
     def to_dict(self) -> dict[str, Any]:
-        """Полное состояние симуляции в виде словаря (для JSON).
-
-        Returns:
-            dict с ключами: ticks, width, height, grid, sources,
-            active_water, trucks.
-        """
-        sources_list = [
-            {"x": x, "y": y, "intensity": val}
-            for (x, y), val in self.sources.items()
-        ]
-        water_list = [{"x": x, "y": y} for (x, y) in self.active_water]
-        trucks_list = [truck.to_dict() for truck in self.firetrucks.values()]
-
+        """Полное состояние для JSON."""
         return {
             "ticks": self.ticks,
             "width": self.width,
             "height": self.height,
             "grid": self.grid,
-            "sources": sources_list,
-            "active_water": water_list,
-            "trucks": trucks_list,
+            "sources": [
+                {"x": x, "y": y, "intensity": v}
+                for (x, y), v in self.sources.items()
+            ],
+            "active_water": [{"x": x, "y": y} for x, y in self.active_water],
+            "trucks": [t.to_dict() for t in self.firetrucks.values()],
         }

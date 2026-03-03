@@ -491,6 +491,18 @@ def get_vehicle_types():
             """
         ).fetchall()
         counts = {row["type_key"]: row["cnt"] for row in counts_rows}
+
+        roster_rows = game_con.execute(
+            """
+            SELECT
+                TRIM(SUBSTR(v.model_name, 1, INSTR(v.model_name, '#') - 1)) AS type_key,
+                COUNT(*) AS cnt
+            FROM fire_roster fr
+            JOIN vehicles v ON v.id = fr.vehicle_id
+            GROUP BY type_key
+            """
+        ).fetchall()
+        in_roster = {row["type_key"]: row["cnt"] for row in roster_rows}
     finally:
         game_con.close()
 
@@ -504,6 +516,7 @@ def get_vehicle_types():
             "crew_size": t["crew_size"],
             "ladder_height_m": t["ladder_height_m"],
             "count": counts.get(t["key"], 0),
+            "in_roster": in_roster.get(t["key"], 0),
         }
         for t in types
     ])

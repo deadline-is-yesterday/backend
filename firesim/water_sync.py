@@ -34,7 +34,9 @@ def sync_hose_ends(game_id: str) -> None:
         mapped_id = state.game_to_map.get(game_id)
         if mapped_id:
             sim = state.simulations.get(mapped_id)
+            logger.debug("sync_hose_ends: found sim via mapping %s -> %s", game_id, mapped_id)
     if sim is None:
+        logger.warning("sync_hose_ends: NO simulation found for game_id=%s", game_id)
         return
 
     con = get_game_db(game_id)
@@ -119,8 +121,8 @@ def sync_hose_ends(game_id: str) -> None:
                 # Пересчёт пиксели → клетки сетки
                 gx = he["x"] * resolution / _PLAN_W
                 gy = he["y"] * grid_rows / _PLAN_H
-                # angle в БД — градусы, в движке — радианы
-                angle_rad = math.radians(he["angle"])
+                # angle в БД — градусы (0° = север), в движке — радианы (0 = восток)
+                angle_rad = math.radians(he["angle"] - 90)
                 nozzles_data.append({
                     "id": str(he["id"]),
                     "x": gx,
@@ -138,7 +140,16 @@ def sync_hose_ends(game_id: str) -> None:
             if tid.startswith("vehicle_") and tid not in synced_ids
         ]
         for tid in stale:
+            truck = sim.firetrucks[tid]
+            # Сохраняем текущий уровень воды в DB перед удалением из памяти
+            vid = tid[len("vehicle_"):]
+            con.execute(
+                "UPDATE placed_cars SET water_current_l = ? WHERE vehicle_id = ?",
+                (round(truck.water, 2), vid),
+            )
             del sim.firetrucks[tid]
+        if stale:
+            con.commit()
 
         logger.debug(
             "sync_hose_ends: game=%s, trucks=%d, total_nozzles=%d",

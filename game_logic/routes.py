@@ -186,23 +186,24 @@ def create_car():
 def update_car():
     """Move a car on the fire scene."""
     data = request.get_json()
-    car_id = data.get("id")
+    vehicle_id = data.get("id")
     x = data.get("x")
     y = data.get("y")
 
-    if car_id is None or x is None or y is None:
+    if vehicle_id is None or x is None or y is None:
         return jsonify({"error": "id, x, y are required"}), 400
 
     con = get_game_db(get_active_game_id())
     try:
-        row = con.execute("SELECT id FROM placed_cars WHERE id = ?", (car_id,)).fetchone()
+        row = con.execute("SELECT id FROM placed_cars WHERE vehicle_id = ?", (vehicle_id,)).fetchone()
         if row is None:
             return jsonify({"error": "placed car not found"}), 404
 
-        con.execute("UPDATE placed_cars SET x = ?, y = ? WHERE id = ?", (x, y, car_id))
+        placed_id = row["id"]
+        con.execute("UPDATE placed_cars SET x = ?, y = ? WHERE id = ?", (x, y, placed_id))
         con.commit()
-        log_event(get_active_game_id(), "car_move", {"placed_id": car_id, "x": x, "y": y})
-        logger.info("CAR MOVE: placed_id=%s x=%.1f y=%.1f", car_id, x, y)
+        log_event(get_active_game_id(), "car_move", {"vehicle_id": vehicle_id, "x": x, "y": y})
+        logger.info("CAR MOVE: vehicle_id=%s x=%.1f y=%.1f", vehicle_id, x, y)
         return jsonify({"ok": True})
     finally:
         con.close()
@@ -212,21 +213,22 @@ def update_car():
 def delete_car():
     """Remove a car from the fire scene."""
     data = request.get_json()
-    car_id = data.get("id")
+    vehicle_id = data.get("id")
 
-    if car_id is None:
+    if vehicle_id is None:
         return jsonify({"error": "id is required"}), 400
 
     con = get_game_db(get_active_game_id())
     try:
-        row = con.execute("SELECT id FROM placed_cars WHERE id = ?", (car_id,)).fetchone()
+        row = con.execute("SELECT id FROM placed_cars WHERE vehicle_id = ?", (vehicle_id,)).fetchone()
         if row is None:
             return jsonify({"error": "placed car not found"}), 404
 
-        con.execute("DELETE FROM placed_cars WHERE id = ?", (car_id,))
+        placed_id = row["id"]
+        con.execute("DELETE FROM placed_cars WHERE id = ?", (placed_id,))
         con.commit()
-        log_event(get_active_game_id(), "car_remove", {"placed_id": car_id})
-        logger.info("CAR DELETE: placed_id=%s", car_id)
+        log_event(get_active_game_id(), "car_remove", {"vehicle_id": vehicle_id})
+        logger.info("CAR DELETE: vehicle_id=%s", vehicle_id)
         return jsonify({"ok": True})
     finally:
         con.close()
@@ -341,10 +343,13 @@ def delete_hose():
         if row is None:
             return jsonify({"error": "hose not found"}), 404
 
+        # Сначала удаляем стволы рукава — они влияют на симуляцию
+        con.execute("DELETE FROM placed_hose_ends WHERE placed_hose_id = ?", (hose_id,))
         con.execute("DELETE FROM placed_hoses WHERE id = ?", (hose_id,))
         con.commit()
         log_event(get_active_game_id(), "hose_remove", {"hose_id": hose_id})
         logger.info("HOSE DELETE: id=%s", hose_id)
+        sync_hose_ends(get_active_game_id())
         return jsonify({"ok": True})
     finally:
         con.close()
